@@ -1,0 +1,35 @@
+# kaanbal-console - Public Dashboard
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: kaanbal-console
+  labels:
+    app: kaanbal-console
+    kaanbal-engine.io/exposure: public
+  annotations:
+    cert-manager.io/cluster-issuer: "letsencrypt-prod"
+    nginx.ingress.kubernetes.io/ssl-redirect: "false"
+spec:
+  ingressClassName: nginx
+  tls:
+  - hosts:
+    - kaanbal-console.futurefarms.mx
+    secretName: kaanbal-console-tls
+  rules:
+  - host: kaanbal-console.futurefarms.mx
+    http:
+      paths:
+      - path: /api/
+        pathType: Prefix
+        backend:
+          service:
+            name: kaanbal-api
+            port:
+              number: 8000
+      - path: /
+        pathType: Prefix
+        backend:
+          service:
+            name: kaanbal-console
+            port:
+              number: 80

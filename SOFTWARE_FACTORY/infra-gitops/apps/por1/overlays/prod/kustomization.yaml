@@ -1,0 +1,42 @@
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+resources:
+- ../../base
+namespace: prod
+
+commonLabels:
+  environment: prod
+
+images:
+  - name: nginx:stable-alpine
+    newName: andresupmh/por1
+    newTag: prod-e36412d
+
+patches:
+- target:
+    kind: Deployment
+    name: por1
+  patch: |-
+    - op: replace
+      path: /spec/replicas
+      value: 1
+
+- target:
+    kind: Ingress
+    name: por1
+  patch: |-
+    - op: replace
+      path: /spec/rules/0/host
+      value: por1.futurefarms.mx
+    - op: replace
+      path: /spec/tls/0/hosts/0
+      value: por1.futurefarms.mx
+    - op: replace
+      path: /spec/tls/0/secretName
+      value: tls-por1
+
+# Generated secrets by Kaanbal Engine
+secretGenerator:
+  - name: por1-secrets
+    literals:
+      - APP_SECRET=hWtlN7j2HPgRkGgYcYNCLXpq

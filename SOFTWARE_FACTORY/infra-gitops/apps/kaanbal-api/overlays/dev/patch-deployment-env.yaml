@@ -1,0 +1,26 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: kaanbal-api
+spec:
+  template:
+    metadata:
+      labels:
+        environment: dev
+    spec:
+      containers:
+      - name: kaanbal-api
+        env:
+        - $patch: replace
+        - name: MONGODB_URI
+          value: "mongodb://admin:CHANGEME_DB_PASSWORD@datastore.prod.svc.cluster.local:27017/forge?authSource=admin"
+        - name: DOMAIN
+          value: "futurefarms.mx"
+        - name: GIT_PROVIDER
+          value: "github"
+        - name: BITBUCKET_WORKSPACE
+          value: "futurefarms-softwarefactory"
+        - name: INFRA_REPO
+          value: "infra-gitops"
+        - name: SECRET_KEY
+          value: "Ws6I4BI7n06yYAJCoYhfZpvTJf5lOTuyMbz8GVE9hdVatE9rR8JB8XybrWtHfds8"

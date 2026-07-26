@@ -1,0 +1,48 @@
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+resources:
+  - public-ingress-websocket.yaml
+  - public-ingress-http.yaml
+  - ../../base
+namespace: prod
+
+commonLabels:
+  environment: prod
+
+images:
+  - name: nginx:stable-alpine
+    newName: andresupmh/fago-api
+    newTag: prod-b32b569
+
+patches:
+- target:
+    kind: Deployment
+    name: fago-api
+  patch: |-
+    - op: replace
+      path: /spec/replicas
+      value: 1
+
+# Tailscale-only — remove base nginx Ingress to avoid host conflicts
+- target:
+    kind: Ingress
+    name: fago-api
+  patch: |-
+    $patch: delete
+    apiVersion: networking.k8s.io/v1
+    kind: Ingress
+    metadata:
+      name: fago-api
+
+# Generated secrets by Kaanbal Engine
+secretGenerator:
+  - name: fago-api-secrets
+    literals:
+      - SECRET_KEY=cBiex1lUTYJ8r1RuS4XgoLBn
+      - MONGODB_URI=
+      - FAGO_BD_POSTGRES_HOST=fago-bd-postgres.prod.svc.cluster.local
+      - FAGO_BD_POSTGRES_PORT=5432
+      - FAGO_BD_POSTGRES_DATABASE=fago_bd_postgres
+      - FAGO_BD_POSTGRES_USER=proadmin
+      - FAGO_BD_POSTGRES_PASSWORD=tnrT3J36fB4sJBFSmocEFwt4
+      - FAGO_BD_POSTGRES_URI=postgresql://proadmin:tnrT3J36fB4sJBFSmocEFwt4@fago-bd-postgres.prod.svc.cluster.local:5432/fago_bd_postgres

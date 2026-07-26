@@ -1,0 +1,53 @@
+# ==============================================================================
+# Dedicated Application for Tailscale Operator (prune:false)
+# ==============================================================================
+# FIX RC-1: Never prune operator-created proxy StatefulSets/Secrets.
+# These are managed by the operator and are NOT in git.
+# ==============================================================================
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: tailscale-operator
+  namespace: argocd
+  labels:
+    app: tailscale-operator
+    env: core
+    managed-by: manual
+  finalizers:
+    - resources-finalizer.argocd.argoproj.io
+spec:
+  project: software-factory
+  source:
+    repoURL: https://github.com/futurefarms-softwarefactory/infra-gitops.git
+    targetRevision: HEAD
+    path: apps/tailscale-operator/overlays/dev
+  destination:
+    server: https://kubernetes.default.svc
+    namespace: tailscale
+  ignoreDifferences:
+    - group: apps
+      kind: StatefulSet
+      managedFieldsManagers:
+        - tailscale-operator
+    - group: ""
+      kind: Secret
+      managedFieldsManagers:
+        - tailscale-operator
+    - group: ""
+      kind: ServiceAccount
+      jsonPointers:
+        - /secrets
+  syncPolicy:
+    automated:
+      prune: false
+      selfHeal: true
+    syncOptions:
+      - CreateNamespace=true
+      - ServerSideApply=true
+      - ApplyOutOfSyncOnly=true
+    retry:
+      limit: 5
+      backoff:
+        duration: 10s
+        factor: 2
+        maxDuration: 3m

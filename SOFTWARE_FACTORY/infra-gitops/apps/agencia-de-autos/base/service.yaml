@@ -1,0 +1,14 @@
+apiVersion: v1
+kind: Service
+metadata:
+  name: agencia-de-autos
+  namespace: prod
+  labels:
+    app: agencia-de-autos
+spec:
+  selector:
+    app: agencia-de-autos
+  ports:
+    - port: 80
+      targetPort: 80
+      protocol: TCP

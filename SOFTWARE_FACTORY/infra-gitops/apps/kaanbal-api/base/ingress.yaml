@@ -1,0 +1,29 @@
+# kaanbal-api - Public API
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: kaanbal-api
+  labels:
+    app: kaanbal-api
+    kaanbal-engine.io/exposure: public
+  annotations:
+    cert-manager.io/cluster-issuer: "letsencrypt-prod"
+    nginx.ingress.kubernetes.io/ssl-redirect: "false"
+    nginx.ingress.kubernetes.io/proxy-body-size: "50m"
+spec:
+  ingressClassName: nginx
+  tls:
+  - hosts:
+    - kaanbal-api.futurefarms.mx
+    secretName: kaanbal-api-tls
+  rules:
+  - host: kaanbal-api.futurefarms.mx
+    http:
+      paths:
+      - path: /
+        pathType: Prefix
+        backend:
+          service:
+            name: kaanbal-api
+            port:
+              number: 8000

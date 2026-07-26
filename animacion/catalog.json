@@ -1,0 +1,80 @@
+{
+  "version": 1,
+  "character": "Acuaponsito",
+  "scene_dna": "Robot blanco redondo con brote de hoja verde en la cabeza, cara oscura con ojos cian brillantes, hexágono con hoja en el pecho. Fondo degradado azul profundo, cámara frontal fija, iluminación suave cian. Estilo 3D tierno, hiperrealista-cartoon.",
+  "rules": {
+    "clip_seconds": 10,
+    "quiet_last_second": true,
+    "format": "mp4 H.264, 1280x720 o superior",
+    "naming": "estado__variante-detalle.mp4 (kebab-case, sin espacios de preferencia)"
+  },
+  "states": {
+    "sleep":     { "desc": "Dormido, en espera de ser despertado. Estado inicial del sistema.", "fallback": "idle" },
+    "wake":      { "desc": "Despierta, abre los ojos y te observa con curiosidad. No habla.", "fallback": "greet" },
+    "greet":     { "desc": "Saluda con la mano, da la bienvenida con calidez.", "fallback": "idle" },
+    "idle":      { "desc": "Atento y neutral: flota, parpadea, observa. El estado por defecto.", "fallback": "greet" },
+    "listen":    { "desc": "Escucha activamente al usuario (mano al oído, ondas de audio).", "fallback": "idle" },
+    "think":     { "desc": "Procesa, analiza, resuelve algo. Puede mostrar esfuerzo.", "fallback": "listen" },
+    "speak":     { "desc": "Responde: boca-luz abstracta con pulsos de audio cian (nunca lip-sync humano).", "fallback": "idle" },
+    "work":      { "desc": "Trabajando en una tarea: cuidando la plantita, tecleando hologramas.", "fallback": "think" },
+    "celebrate": { "desc": "Éxito: salta, festeja, confeti.", "fallback": "greet" },
+    "warn":      { "desc": "Alerta o precaución: ceño serio, señal de advertencia.", "fallback": "think" },
+    "error":     { "desc": "Algo salió mal: apenado, se disculpa.", "fallback": "warn" },
+    "rest":      { "desc": "Descansando o cargando batería, despedida suave.", "fallback": "sleep" }
+  },
+  "clips": [
+    {
+      "id": "sleep__siesta",
+      "file": "siesta-me-quede-dormido.mp4",
+      "state": "sleep",
+      "title": "Siesta profunda",
+      "description": "Acuaponsito dormido con Zzz, recargando junto a su panel de batería. Usar como estado inicial antes de que el sistema/agente IA esté configurado, o en inactividad prolongada.",
+      "energy": "baja",
+      "loop": true,
+      "tags": ["inicio", "espera", "offline"],
+      "added": "2026-07-03"
+    },
+    {
+      "id": "greet__saludo",
+      "file": "saludando.mp4",
+      "state": "greet",
+      "title": "Saludo de bienvenida",
+      "description": "Levanta la mano y saluda con una sonrisa cálida. Usar al dar la bienvenida, al despertar (mientras no exista clip wake dedicado) y al recibir de vuelta al usuario.",
+      "energy": "media",
+      "loop": true,
+      "tags": ["bienvenida", "despertar-provisional", "hola"],
+      "added": "2026-07-03"
+    },
+    {
+      "id": "listen__atento-serio",
+      "file": "escuchando-al-final-serio.mp4",
+      "state": "listen",
+      "title": "Escucha atenta que termina seria",
+      "description": "Mano al oído con ondas de audio; hacia el final adopta gesto serio y concentrado. Usar cuando el usuario está escribiendo/dictando algo importante, o antes de procesar una petición compleja. El final serio conecta natural con think.",
+      "energy": "media",
+      "loop": true,
+      "tags": ["escucha", "atencion", "transicion-a-think"],
+      "added": "2026-07-03"
+    },
+    {
+      "id": "think__esfuerzo",
+      "file": "pensando con algo de dificultad.mp4",
+      "state": "think",
+      "title": "Pensando con esfuerzo",
+      "description": "Procesa con gesto de concentración y algo de dificultad, hologramas de análisis. Usar durante operaciones largas (instalación, despliegue, cálculo) o cuando la petición es difícil. Transmite honestidad: esto cuesta trabajo.",
+      "energy": "media",
+      "loop": true,
+      "tags": ["procesando", "analisis", "carga", "dificultad"],
+      "added": "2026-07-03"
+    }
+  ],
+  "wishlist": [
+    { "state": "wake", "prompt_hint": "Despierta lentamente de la siesta, abre los ojos cian, mira a cámara con curiosidad creciente. NO habla. Terminar quieto mirando al frente." },
+    { "state": "speak", "prompt_hint": "Habla con boca-luz abstracta (waveform cian pulsante, NO lip-sync humano), gestos suaves con las manos. Terminar quieto." },
+    { "state": "celebrate", "prompt_hint": "Salta de alegría con confeti de hojas verdes y destellos cian. Terminar aterrizando quieto y sonriente." },
+    { "state": "warn", "prompt_hint": "Gesto serio con dedo índice levantado y señal holográfica de advertencia naranja suave. Terminar quieto." },
+    { "state": "error", "prompt_hint": "Se encoge apenado, ojos hacia abajo, pequeña nube de humo o chispa; se disculpa con gesto. Terminar quieto." },
+    { "state": "idle", "prompt_hint": "Flota suavemente, parpadea, mira alrededor con calma. Loop perfecto: primer y último frame casi idénticos." },
+    { "state": "work", "prompt_hint": "Cuida su plantita o teclea hologramas con ambas manos, concentrado y contento. Terminar quieto." }
+  ]
+}

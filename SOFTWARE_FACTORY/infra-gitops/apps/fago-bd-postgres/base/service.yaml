@@ -1,0 +1,32 @@
+apiVersion: v1
+kind: Service
+metadata:
+  name: fago-bd-postgres
+  namespace: prod
+  labels:
+    app: fago-bd-postgres
+spec:
+  selector:
+    app: fago-bd-postgres
+  ports:
+    - port: 5432
+      targetPort: 5432
+      protocol: TCP
+      name: postgres
+  clusterIP: None
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: fago-bd-postgres-svc
+  namespace: prod
+  labels:
+    app: fago-bd-postgres
+spec:
+  selector:
+    app: fago-bd-postgres
+  ports:
+    - port: 5432
+      targetPort: 5432
+      protocol: TCP
+      name: postgres

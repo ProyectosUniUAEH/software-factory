@@ -1,0 +1,47 @@
+# ServiceAccount with cluster-wide permissions for kaanbal-api
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: kaanbal-api
+  labels:
+    app: kaanbal-api
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: kaanbal-api-role
+rules:
+# Read access to most resources + patch for services (Tailscale tag management)
+- apiGroups: [""]
+  resources: ["pods", "configmaps", "secrets", "namespaces", "persistentvolumeclaims", "events"]
+  verbs: ["get", "list", "watch"]
+- apiGroups: [""]
+  resources: ["services"]
+  verbs: ["get", "list", "watch", "patch"]
+- apiGroups: ["apps"]
+  resources: ["deployments", "replicasets", "statefulsets", "daemonsets"]
+  verbs: ["get", "list", "watch"]
+- apiGroups: ["networking.k8s.io"]
+  resources: ["ingresses"]
+  verbs: ["get", "list", "watch"]
+# ArgoCD resources
+- apiGroups: ["argoproj.io"]
+  resources: ["applications", "applicationsets", "appprojects"]
+  verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
+# Pod logs
+- apiGroups: [""]
+  resources: ["pods/log"]
+  verbs: ["get", "list"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: kaanbal-api-binding
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: kaanbal-api-role
+subjects:
+- kind: ServiceAccount
+  name: kaanbal-api
+  namespace: prod

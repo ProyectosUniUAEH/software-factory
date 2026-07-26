@@ -1,0 +1,25 @@
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+resources:
+    - ../../base
+namespace: prod
+
+commonLabels:
+  environment: prod
+
+patches:
+- target:
+    kind: Deployment
+    name: homepage-db
+  patch: |-
+    - op: replace
+      path: /spec/replicas
+      value: 1
+
+
+# Generated secrets by Kaanbal Engine
+secretGenerator:
+  - name: homepage-db-secrets
+    literals:
+      - MONGO_USER=proadmin
+      - MONGO_PASSWORD=Hvh0DtFdd5WkEN51oCP9sNuz

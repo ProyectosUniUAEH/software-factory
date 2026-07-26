@@ -1,0 +1,59 @@
+# Entornos y secretos
+.env
+.env.*
+*.env
+*.local
+*.secret
+*.pem
+*.key
+*.crt
+*.p12
+*.pfx
+
+# Bases de datos y datos sensibles
+*.sqlite
+*.db
+*.sqlite3
+
+# Logs y temporales
+*.log
+*.tmp
+*.temp
+
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+.venv/
+venv/
+
+# Node / frontend
+node_modules/
+.next/
+out/
+build/
+dist/
+coverage/
+
+# IDE y sistema
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
+
+# Archivos de credenciales y tokens
+credentials.json
+auth.json
+token*
+*.token
+
+# Carpeta de secretos del proyecto — NUNCA se sube (llaves, backups, .env)
+SOFTWARE_FACTORY_SECRETS/
+# Backups y dumps de base de datos
+*.tar.gz
+*.bson
+*.bson.gz
+vault-keys*
+*.pub
+# Datos locales del runtime del agente
+.acuaponsito/

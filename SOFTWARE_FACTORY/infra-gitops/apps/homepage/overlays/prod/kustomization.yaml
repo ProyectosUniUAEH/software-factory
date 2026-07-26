@@ -1,0 +1,42 @@
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+resources:
+- ../../base
+namespace: prod
+
+commonLabels:
+  environment: prod
+
+images:
+  - name: nginx:stable-alpine
+    newName: andresupmh/homepage
+    newTag: prod-6aea4e3
+
+patches:
+- target:
+    kind: Deployment
+    name: homepage
+  patch: |-
+    - op: replace
+      path: /spec/replicas
+      value: 1
+
+- target:
+    kind: Ingress
+    name: homepage
+  patch: |-
+    - op: replace
+      path: /spec/rules/0/host
+      value: futurefarms.mx
+    - op: replace
+      path: /spec/tls/0/hosts/0
+      value: futurefarms.mx
+    - op: replace
+      path: /spec/tls/0/secretName
+      value: tls-root
+
+# Generated secrets by Kaanbal Engine
+secretGenerator:
+  - name: homepage-secrets
+    literals:
+      - APP_SECRET=a3vcMDSrkTN7w3qO33WqbZhw

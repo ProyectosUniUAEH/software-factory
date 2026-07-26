@@ -1,0 +1,42 @@
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+resources:
+- ../../base
+namespace: dev
+
+commonLabels:
+  environment: dev
+
+images:
+  - name: nginx:stable-alpine
+    newName: andresupmh/fago
+    newTag: dev-963484e
+
+patches:
+- target:
+    kind: Deployment
+    name: fago
+  patch: |-
+    - op: replace
+      path: /spec/replicas
+      value: 1
+
+- target:
+    kind: Ingress
+    name: fago
+  patch: |-
+    - op: replace
+      path: /spec/rules/0/host
+      value: dev-fago.futurefarms.mx
+    - op: replace
+      path: /spec/tls/0/hosts/0
+      value: dev-fago.futurefarms.mx
+    - op: replace
+      path: /spec/tls/0/secretName
+      value: tls-dev-fago
+
+# Generated secrets by Kaanbal Engine
+secretGenerator:
+  - name: fago-secrets
+    literals:
+      - APP_SECRET=GVSxfbICmYEXWsGkAtMRHO2u

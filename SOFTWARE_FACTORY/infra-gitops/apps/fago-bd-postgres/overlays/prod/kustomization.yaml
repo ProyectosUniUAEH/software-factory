@@ -1,0 +1,26 @@
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+resources:
+- ../../base
+namespace: prod
+
+commonLabels:
+  environment: prod
+
+patches:
+- target:
+    kind: Deployment
+    name: fago-bd-postgres
+  patch: |-
+    - op: replace
+      path: /spec/replicas
+      value: 1
+
+
+# Generated secrets by Kaanbal Engine
+secretGenerator:
+  - name: fago-bd-postgres-secrets
+    literals:
+      - POSTGRES_USER=proadmin
+      - POSTGRES_PASSWORD=tnrT3J36fB4sJBFSmocEFwt4
+      - POSTGRES_DB=fago_bd_postgres

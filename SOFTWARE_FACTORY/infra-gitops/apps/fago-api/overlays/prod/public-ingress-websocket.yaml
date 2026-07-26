@@ -1,0 +1,32 @@
+# Auto-generated per-port public Ingress (websocket) - Kaanbal Engine
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: fago-api-websocket
+  labels:
+    app: fago-api
+    software-factory.io/exposure: public
+    software-factory.io/port: "websocket"
+  annotations:
+    cert-manager.io/cluster-issuer: "letsencrypt-prod"
+    nginx.ingress.kubernetes.io/ssl-redirect: "false"
+    nginx.ingress.kubernetes.io/proxy-http-version: "1.1"
+    nginx.ingress.kubernetes.io/proxy-read-timeout: "86400"
+    nginx.ingress.kubernetes.io/proxy-send-timeout: "86400"
+spec:
+  ingressClassName: nginx
+  tls:
+    - hosts:
+        - fago-api.futurefarms.mx
+      secretName: tls-fago-api-websocket
+  rules:
+    - host: fago-api.futurefarms.mx
+      http:
+        paths:
+          - path: /ws
+            pathType: Prefix
+            backend:
+              service:
+                name: fago-api
+                port:
+                  number: 8000

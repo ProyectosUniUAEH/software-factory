@@ -1,0 +1,35 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: agencia-de-autos
+  namespace: prod
+  labels:
+    app: agencia-de-autos
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: agencia-de-autos
+  template:
+    metadata:
+      labels:
+        app: agencia-de-autos
+    spec:
+      containers:
+        - name: app
+          image: nginx:stable-alpine
+          ports:
+            - containerPort: 80
+          resources:
+            requests:
+              cpu: 50m
+              memory: 64Mi
+            limits:
+              cpu: 200m
+              memory: 128Mi
+          readinessProbe:
+            httpGet:
+              path: /
+              port: 80
+            initialDelaySeconds: 5
+            periodSeconds: 10

@@ -1,0 +1,25 @@
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: agencia-de-autos
+  namespace: prod
+  annotations:
+    cert-manager.io/cluster-issuer: letsencrypt-prod
+    nginx.ingress.kubernetes.io/ssl-redirect: "false"
+spec:
+  ingressClassName: nginx
+  tls:
+    - hosts:
+        - agencia-de-autos.futurefarms.mx
+      secretName: agencia-de-autos-tls
+  rules:
+    - host: agencia-de-autos.futurefarms.mx
+      http:
+        paths:
+          - path: /
+            pathType: Prefix
+            backend:
+              service:
+                name: agencia-de-autos
+                port:
+                  number: 80

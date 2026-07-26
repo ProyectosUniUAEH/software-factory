@@ -1,0 +1,63 @@
+me encanta el disenio pero toma los 3 videos y alternalos, no debe decir, acuaponsito debe tomar videa para eos cree un nuevo video donde esta epserndo ser despertado y uno donde despierta y te observa interactua pero no habla
+
+aqui seria genial que siempre este flotante, no deberia decir escuchando y eso, eso es implisito
+la transicion entre videos debe ser ingeniosa par qeu no se noten los cortes
+
+lo que haremos al inicio es poner o configurar un agente de IA
+puede ser token para claude, open ia deepseek ypo probare con este primero, para que sea tanto parte del instalador como el sistema, ya que implementaremos agentes y es importante tener su provedor de una vez, incluso puede configruar uno o mas para que cada que metamos duncionalidades llm elijamos el modelo sea comnfigurable toma esto en cuenta y mejora significativamente la experinencia de usuario
+acuaponsito debe estar como flotante en todo moemnto sin estorbar al usuario
+la idea es que lleve la scena una vez validas la api de deepseek entontonces ahora si sdepsierta y ya puedes usar el modelo con un prompt pre deifnido para que saluide al usuario y lo vaya mostrando como texto, luego metemos vox ahora asi esta bien, las letras que se vean bien igual podemos ir sincronizando video con accion, por eos maneja estados a eacuaponsitos y yo hago los videos 
+podemos hacer algo escalable ejemplo
+un json que defina un prompt la repsuesta del llm tu mejora esto
+y l accion asi el llm esta conectado con el clip, me refiero a poder hacer un sistema de video interactivo asi con muchos clips, esos pueden ir aumentando, esto me interesa porque lo usare en otro proyecto y puedo retomar la idea asi que pongamos atencion en esta caracteristica
+
+la idea es tener un md con instrucciones de donde agregar un nuevo video como hacerlo parte del repertorio para que el mismo agente llm lo pueda usar y mostrar lo que su prompt diga, es como que el llm devuelva repsuesta mas metadata sobre comportamiento del bot leyendo el catalogo primero
+debe saber que puede aver mas en el futuro y la dimaica
+lo que queremos lograr es que el agente logre controlar esos videos de 10 segundos que tratan d emantener todos coherencia de scenario y lo que hacen 
+igual podriamos tener varias verciones de escuchando, hablando etc, asi hay mas variedad, define un buen arbol, que si genero 3 videos diaros puedo tener un super repertorio de acuaponsito
+
+incluso ahorita los videos que tengo los describi mas como una oracion accion describiendo un poco mas podria haber algo asi mas descriptivo para que sepa cuando usar, si partimos siempre de los videos de 10 segundos
+ve el nombre que puse pero puedes darme mejores descripciones
+debe ser tan claro como agregar al catalogo para que ya lo tome en cuenta el llm que un modelo de ia como haiku lo haga sin problemas
+
+sin dejar pasar nada
+D:\SOFTWARE_FACTORY_SECRETS\animacion
+aqui estan los videos ve los titulos bien e inciemos con esos yop  ire agregando todos los dias
+las instrucicones igual podria hacerlas yo, haz una verison simple para personas manualmente
+
+en el mismo md de explciaiconesde este sistema de animacion, de echo ponlo en la carpeta animacion D:\SOFTWARE_FACTORY_SECRETS\animacion igual aui ese sistema de animacion como framework
+
+¡Me encanta hacia dónde lo llevas! Esto es grande: Acuaponsito flotante sin etiquetas, crossfade sin cortes, el agente IA como primer paso del instalador (y del sistema), y un framework de video interactivo dirigido por LLM — reutilizable para tus otros proyectos. Primero veo qué videos tienes en la carpeta animacion:
+
+
+Creado 2 archivos, editado un archivo, usado 8 herramientas
+Ojo: usé urllib.request.quote que no existe — corrijo a urllib.parse.quote y agrego los helpers del agente IA:
+
+
+Editado 2 archivos, creado 2 archivos, usado 6 herramientas
+Script de verificación en archivo (adiós, comillas anidadas):
+
+
+Creado un archivo, usado 3 herramientas
+
+Guardado una memoria
+🌱 Listo — la v2 está viva en tu navegador, y el framework quedó donde lo pediste
+http://localhost:3000/?token=kbl-fable-2026 — verificado de punta a punta antes de abrírtelo.
+
+La nueva historia que vas a vivir
+Acuaponsito ahora empieza DORMIDO (tu clip siesta-me-quede-dormido), flotante en la esquina inferior derecha — sin etiquetas de texto, el estado se ve, no se lee. Puedes arrastrarlo a donde quieras, nunca estorba. Si le das clic dormido, te susurra: "Zzz… conéctame un proveedor de IA para despertar 🌱".
+
+El nuevo paso 1 es el Agente IA: eliges proveedor (DeepSeek recomendado primero, como pediste — también Claude y OpenAI, puedes conectar varios), pegas tu API key y das "Conectar y despertar ⚡". Cuando la key valida contra la API real: Acuaponsito despierta (transición con crossfade de 600ms — los cortes desaparecen porque tus clips terminan quietos), se enciende su anillo verde, y el LLM de verdad lo saluda: DeepSeek recibe el catálogo completo, responde el contrato JSON {say, state, clip}, y su texto aparece en la burbuja con efecto typewriter (lista para sincronizar voz después). Las keys terminan como Secret kaanbal-ai-providers en tu cluster — parte del sistema, no solo del instalador, para todos los agentes que vienen.
+
+El framework — tu pieza reutilizable
+En D:\SOFTWARE_FACTORY_SECRETS\animacion\ como pediste:
+
+catalog.json — tus 4 clips catalogados con descripciones ricas para el LLM (mejoré tus títulos: sleep__siesta, greet__saludo, listen__atento-serio con nota de que su final serio conecta natural con think, think__esfuerzo), el árbol de estados con fallbacks (si no existe clip de wake, cae a greet automáticamente — nunca pantalla negra), y una wishlist con los prompts listos para tus 3 generaciones diarias (prioridad: wake y speak, cierran el ciclo conversacional).
+ACUAPONSITO_FRAMEWORK.md — el framework completo: cómo funciona, el contrato LLM (a prueba de Haiku: una decisión de estado + una opcional de clip, equivocarse es barato), la guía humana de 3 pasos para agregar videos, y las reglas de generación que ya aprendiste con Gemini (escena ADN, último segundo quieto, boca-waveform nunca lip-sync).
+Lo mejor: el instalador sirve los clips directo desde esa carpeta. Mañana generas un video, lo copias ahí, agregas su entrada al JSON, refrescas — y el LLM ya puede usarlo. Cero redeploy. Para reusarlo en otro proyecto: copias la clase AcuaBot de app.js, sirves la carpeta por HTTP, y le das al LLM el system prompt de la sección 6 del MD.
+
+Verificado en vivo
+UI 200 · catálogo source: animacion con los 4 clips · videos con Range HTTP 206 (hasta el de nombre con espacios) · validación IA llegó a DeepSeek real (401 elegante con key falsa) · compilación limpia.
+
+Pruébalo: entra, avanza al paso del agente, pega tu key de DeepSeek y mira el despertar. Es el momento que diseñaste. Luego dime: ¿ajustamos el timing del typewriter, el tamaño del flotante, o vamos por la voz (TTS sobre el say)?
+

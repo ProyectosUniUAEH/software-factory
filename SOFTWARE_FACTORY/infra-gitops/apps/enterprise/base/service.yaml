@@ -1,0 +1,15 @@
+apiVersion: v1
+kind: Service
+metadata:
+  name: enterprise
+  namespace: prod
+  labels:
+    app: enterprise
+spec:
+  selector:
+    app: enterprise
+  ports:
+    - port: 80
+      targetPort: 80
+      protocol: TCP
+      name: http

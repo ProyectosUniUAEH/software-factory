@@ -1,0 +1,50 @@
+# Credentials & secrets
+_private/
+env/
+*_SECRETS/
+credenciales.txt
+*.pem
+*.key
+audit-*.txt
+myconfig.env
+.env
+.env.*
+
+# Archives
+_old/
+.old_agents/
+
+# Agent runtime artifacts
+.agent/teams/runs/
+
+# Temporary files
+tmpclaude-*
+.deploy-tmp/
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+venv/
+
+# Node.js
+node_modules/
+dist/
+build/
+.vite/
+.cache/
+
+# Vaultwarden (local tool)
+vw-data/
+vw-backups/
+
+# Chat replays
+*.chatreplay.json
+
+# Local/editor state
+.claude/
+.vscode/
+
+# OS files
+.DS_Store
+Thumbs.db

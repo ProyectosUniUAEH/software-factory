@@ -1,0 +1,42 @@
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+resources:
+- ../../base
+namespace: prod
+
+commonLabels:
+  environment: prod
+
+images:
+  - name: nginx:stable-alpine
+    newName: andresupmh/agencia-de-autos
+    newTag: prod-261c7f4
+
+patches:
+- target:
+    kind: Deployment
+    name: agencia-de-autos
+  patch: |-
+    - op: replace
+      path: /spec/replicas
+      value: 1
+
+- target:
+    kind: Ingress
+    name: agencia-de-autos
+  patch: |-
+    - op: replace
+      path: /spec/rules/0/host
+      value: agencia-de-autos.futurefarms.mx
+    - op: replace
+      path: /spec/tls/0/hosts/0
+      value: agencia-de-autos.futurefarms.mx
+    - op: replace
+      path: /spec/tls/0/secretName
+      value: tls-agencia-de-autos
+
+# Generated secrets by Kaanbal Engine
+secretGenerator:
+  - name: agencia-de-autos-secrets
+    literals:
+      - APP_SECRET=91DiDPC8i5RjeeloFtHyRhQ0

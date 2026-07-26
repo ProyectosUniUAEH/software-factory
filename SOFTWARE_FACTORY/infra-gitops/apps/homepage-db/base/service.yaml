@@ -1,0 +1,32 @@
+apiVersion: v1
+kind: Service
+metadata:
+  name: homepage-db
+  namespace: prod
+  labels:
+    app: homepage-db
+spec:
+  selector:
+    app: homepage-db
+  ports:
+    - port: 27017
+      targetPort: 27017
+      protocol: TCP
+      name: mongodb
+  clusterIP: None
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: homepage-db-svc
+  namespace: prod
+  labels:
+    app: homepage-db
+spec:
+  selector:
+    app: homepage-db
+  ports:
+    - port: 27017
+      targetPort: 27017
+      protocol: TCP
+      name: mongodb

@@ -1,0 +1,437 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, height=device-height, initial-scale=1.0, maximum-scale=1.0, user-scalable=no" />
+  <title>Kaanbal</title>
+  <style>
+    :root {
+      --bg-deep: #050c14;
+      --bg-glow: #0a2433;
+      --accent: #5eead4;
+      --accent-dim: #2dd4bf66;
+      --ink: #e8f4f2;
+      --ink-soft: #94b8b0;
+      --panel: #081820ee;
+      --border: #1a3a4488;
+    }
+
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+
+    html, body {
+      position: fixed;
+      inset: 0;
+      width: 100%;
+      height: 100%;
+      overflow: hidden;
+      font-family: "Segoe UI", system-ui, sans-serif;
+      background: var(--bg-deep);
+      color: var(--ink);
+      touch-action: manipulation;
+    }
+
+    .screen {
+      position: absolute;
+      inset: 0;
+      display: grid;
+      grid-template-rows: 1fr auto auto;
+      align-items: center;
+      justify-items: center;
+      text-align: center;
+      padding: 2rem 2rem 1.5rem;
+      background:
+        radial-gradient(ellipse 90% 70% at 50% 0%, var(--bg-glow) 0%, transparent 72%),
+        radial-gradient(circle at 15% 85%, #0d3d4a55 0%, transparent 45%),
+        var(--bg-deep);
+    }
+
+    .orb {
+      position: absolute;
+      border-radius: 50%;
+      background: radial-gradient(circle, var(--accent-dim) 0%, transparent 70%);
+      filter: blur(48px);
+      animation: breathe 6s ease-in-out infinite;
+      pointer-events: none;
+    }
+    .orb--left { width: 50vmin; height: 50vmin; top: 5%; left: -10%; }
+    .orb--right { width: 40vmin; height: 40vmin; bottom: 8%; right: -8%; animation-delay: -2s; }
+
+    @keyframes breathe {
+      0%, 100% { opacity: 0.35; transform: scale(1); }
+      50% { opacity: 0.7; transform: scale(1.06); }
+    }
+
+    .hero {
+      position: relative;
+      z-index: 1;
+      max-width: 900px;
+      width: 100%;
+    }
+
+    .badge {
+      display: inline-block;
+      font-size: clamp(0.65rem, 1.4vw, 0.8rem);
+      letter-spacing: 0.22em;
+      text-transform: uppercase;
+      color: var(--accent);
+      border: 1px solid var(--accent-dim);
+      border-radius: 999px;
+      padding: 0.5rem 1.1rem;
+      margin-bottom: 1.5rem;
+      background: #0a1f2a88;
+    }
+
+    h1 {
+      font-size: clamp(2.5rem, 7vw, 5rem);
+      font-weight: 300;
+      letter-spacing: -0.02em;
+      line-height: 1.05;
+      margin-bottom: 0.75rem;
+    }
+
+    h1 strong {
+      font-weight: 600;
+      color: var(--accent);
+    }
+
+    .tagline {
+      font-size: clamp(1rem, 2.2vw, 1.4rem);
+      color: var(--ink-soft);
+      line-height: 1.55;
+      margin-bottom: 1.25rem;
+    }
+
+    .status {
+      display: inline-flex;
+      align-items: center;
+      gap: 0.6rem;
+      font-size: clamp(0.85rem, 1.6vw, 1rem);
+      color: var(--ink-soft);
+      background: var(--panel);
+      border: 1px solid var(--border);
+      border-radius: 14px;
+      padding: 0.8rem 1.3rem;
+    }
+
+    .dot {
+      width: 9px;
+      height: 9px;
+      border-radius: 50%;
+      background: var(--accent);
+      box-shadow: 0 0 14px var(--accent);
+      animation: pulse 2s ease-in-out infinite;
+    }
+
+    @keyframes pulse {
+      0%, 100% { opacity: 1; }
+      50% { opacity: 0.35; }
+    }
+
+    /* Botones táctiles — pensados para pantalla física */
+    .actions {
+      position: relative;
+      z-index: 2;
+      display: grid;
+      grid-template-columns: repeat(4, minmax(0, 1fr));
+      gap: clamp(0.6rem, 1.5vw, 1rem);
+      width: min(960px, 100%);
+      margin-top: 0.5rem;
+    }
+
+    .btn {
+      appearance: none;
+      border: 1px solid var(--border);
+      background: var(--panel);
+      color: var(--ink);
+      border-radius: 16px;
+      padding: clamp(0.9rem, 2vw, 1.2rem) clamp(0.6rem, 1.5vw, 1rem);
+      font-size: clamp(0.85rem, 1.8vw, 1.05rem);
+      font-weight: 500;
+      cursor: pointer;
+      transition: border-color 0.2s, background 0.2s, transform 0.1s;
+      min-height: 56px;
+    }
+
+    .btn:hover, .btn:focus-visible {
+      border-color: var(--accent);
+      background: #0c2835;
+      outline: none;
+    }
+
+    .btn:active { transform: scale(0.97); }
+
+    .btn--primary {
+      border-color: var(--accent-dim);
+      background: linear-gradient(180deg, #0f3540 0%, #0a222c 100%);
+      color: var(--accent);
+    }
+
+    .footer {
+      font-size: clamp(0.65rem, 1.2vw, 0.78rem);
+      color: #4a6a6288;
+      letter-spacing: 0.1em;
+      padding-top: 0.75rem;
+    }
+
+    /* Modal */
+    .overlay {
+      position: fixed;
+      inset: 0;
+      background: #000000bb;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      padding: 1.5rem;
+      opacity: 0;
+      visibility: hidden;
+      transition: opacity 0.25s, visibility 0.25s;
+      z-index: 100;
+    }
+
+    .overlay.open {
+      opacity: 1;
+      visibility: visible;
+    }
+
+    .modal {
+      width: min(520px, 100%);
+      background: #0a1c28;
+      border: 1px solid var(--accent-dim);
+      border-radius: 20px;
+      padding: clamp(1.2rem, 3vw, 1.8rem);
+      box-shadow: 0 24px 80px #00000088;
+      transform: translateY(12px) scale(0.98);
+      transition: transform 0.25s;
+    }
+
+    .overlay.open .modal {
+      transform: translateY(0) scale(1);
+    }
+
+    .modal h2 {
+      font-size: clamp(1.2rem, 3vw, 1.5rem);
+      font-weight: 600;
+      margin-bottom: 0.6rem;
+      color: var(--accent);
+    }
+
+    .modal p {
+      color: var(--ink-soft);
+      line-height: 1.6;
+      font-size: clamp(0.95rem, 2vw, 1.05rem);
+      margin-bottom: 1.25rem;
+    }
+
+    .modal-actions {
+      display: flex;
+      gap: 0.75rem;
+      justify-content: flex-end;
+    }
+
+    .modal-actions .btn { min-height: 44px; padding: 0.65rem 1.2rem; }
+
+    .cmd-box {
+      display: block;
+      font-family: ui-monospace, "Cascadia Code", monospace;
+      font-size: clamp(0.9rem, 2vw, 1.05rem);
+      background: #041018;
+      border: 1px solid var(--border);
+      border-radius: 12px;
+      padding: 0.85rem 1rem;
+      color: var(--accent);
+      margin-bottom: 1rem;
+      user-select: all;
+      text-align: left;
+    }
+
+    .warn {
+      color: #fbbf24;
+      font-size: 0.92rem;
+      margin-bottom: 0.75rem;
+    }
+
+    /* Único botón de escape: modo técnico */
+    .tech-btn {
+      position: fixed;
+      right: 1rem;
+      bottom: 1rem;
+      z-index: 50;
+      appearance: none;
+      border: 1px solid var(--border);
+      background: #081820cc;
+      color: var(--ink-soft);
+      border-radius: 999px;
+      padding: 0.55rem 1rem;
+      font-size: 0.82rem;
+      cursor: pointer;
+      backdrop-filter: blur(8px);
+    }
+
+    .tech-btn:hover, .tech-btn:focus-visible {
+      border-color: var(--accent-dim);
+      color: var(--accent);
+      outline: none;
+    }
+
+    @media (max-width: 700px) {
+      .actions { grid-template-columns: repeat(2, 1fr); }
+    }
+  </style>
+</head>
+<body>
+  <div class="screen">
+    <div class="orb orb--left"></div>
+    <div class="orb orb--right"></div>
+
+    <div class="hero">
+      <div class="badge">Vista previa · kiosk</div>
+      <h1>Hola, <strong>Kaanbal</strong></h1>
+      <p class="tagline">
+        Tu célula local está despertando.<br />
+        Toca un botón para probar la interacción.
+      </p>
+      <div class="status">
+        <span class="dot"></span>
+        <span id="clock">—</span>
+      </div>
+    </div>
+
+    <div class="actions">
+      <button class="btn btn--primary" data-modal="deploy">Desplegar</button>
+      <button class="btn" data-modal="status">Estado</button>
+      <button class="btn" data-modal="network">Red</button>
+      <button class="btn" data-modal="agent">Agente</button>
+    </div>
+
+    <div class="footer">kaanbal · local-first · gitops</div>
+  </div>
+
+  <button class="tech-btn" id="tech-open" type="button" title="Modo técnico">⚙ Consola</button>
+
+  <div class="overlay" id="overlay" hidden>
+    <div class="modal" role="dialog" aria-modal="true">
+      <h2 id="modal-title">Título</h2>
+      <p id="modal-body">Contenido</p>
+      <div class="modal-actions">
+        <button class="btn" id="modal-close">Cerrar</button>
+        <button class="btn btn--primary" id="modal-ok">Entendido</button>
+      </div>
+    </div>
+  </div>
+
+  <div class="overlay" id="tech-overlay" hidden>
+    <div class="modal" role="dialog" aria-modal="true" aria-labelledby="tech-title">
+      <h2 id="tech-title">Modo técnico</h2>
+      <p class="warn">Saldrás de la interfaz Kaanbal y verás la consola de Ubuntu Server.</p>
+      <p>Para volver a pantalla completa, ejecuta en consola:</p>
+      <code class="cmd-box" id="return-cmd">sudo kaanbal-ui</code>
+      <p id="tech-status" hidden></p>
+      <div class="modal-actions">
+        <button class="btn" id="tech-cancel" type="button">Cancelar</button>
+        <button class="btn btn--primary" id="tech-go" type="button">Ir a consola</button>
+      </div>
+    </div>
+  </div>
+
+  <script>
+    const MODE_API = "http://127.0.0.1:8889";
+    const RETURN_CMD = "sudo kaanbal-ui";
+
+    const MODALS = {
+      deploy: {
+        title: "Desplegar aplicación",
+        body: "Desde aquí lanzarás plantillas Vue o FastAPI. El pipeline creará el repo, la imagen Docker y el manifiesto en infra-gitops."
+      },
+      status: {
+        title: "Estado de la célula",
+        body: "k3s activo · instalación en curso · ArgoCD sincronizando. Cuando termine, esta pantalla apuntará a la consola real."
+      },
+      network: {
+        title: "Red y exposición",
+        body: "Público vía Cloudflare en softwarefactory.site. Apps sensibles solo por Tailscale. Tú eliges el nivel desde la consola."
+      },
+      agent: {
+        title: "Agente Acuaponsito",
+        body: "El agente IA trabaja en segundo plano: observa el cluster y propone mejoras sin interrumpir lo que estás haciendo."
+      }
+    };
+
+    const overlay = document.getElementById("overlay");
+    const titleEl = document.getElementById("modal-title");
+    const bodyEl = document.getElementById("modal-body");
+
+    function openModal(key) {
+      const data = MODALS[key];
+      if (!data) return;
+      titleEl.textContent = data.title;
+      bodyEl.textContent = data.body;
+      overlay.hidden = false;
+      requestAnimationFrame(() => overlay.classList.add("open"));
+    }
+
+    function closeModal() {
+      overlay.classList.remove("open");
+      setTimeout(() => { overlay.hidden = true; }, 250);
+    }
+
+    document.querySelectorAll("[data-modal]").forEach(btn => {
+      btn.addEventListener("click", () => openModal(btn.dataset.modal));
+    });
+    document.getElementById("modal-close").addEventListener("click", closeModal);
+    document.getElementById("modal-ok").addEventListener("click", closeModal);
+    overlay.addEventListener("click", e => { if (e.target === overlay) closeModal(); });
+
+    const techOverlay = document.getElementById("tech-overlay");
+    const techStatus = document.getElementById("tech-status");
+    const returnCmdEl = document.getElementById("return-cmd");
+
+    function openTechModal() {
+      returnCmdEl.textContent = RETURN_CMD;
+      techStatus.hidden = true;
+      techOverlay.hidden = false;
+      requestAnimationFrame(() => techOverlay.classList.add("open"));
+      fetch(`${MODE_API}/api/health`)
+        .then(r => r.json())
+        .then(data => {
+          if (data.return_command) returnCmdEl.textContent = data.return_command;
+        })
+        .catch(() => {});
+    }
+
+    function closeTechModal() {
+      techOverlay.classList.remove("open");
+      setTimeout(() => { techOverlay.hidden = true; }, 250);
+    }
+
+    async function goToConsole() {
+      const btn = document.getElementById("tech-go");
+      btn.disabled = true;
+      techStatus.hidden = false;
+      techStatus.textContent = "Cambiando a consola…";
+      try {
+        const res = await fetch(`${MODE_API}/api/console`, { method: "POST" });
+        if (!res.ok) throw new Error("fallo");
+        techStatus.textContent = "Listo. Usa la consola del servidor.";
+      } catch {
+        techStatus.textContent = "No se pudo cambiar automáticamente. Usa: sudo kaanbal-console";
+        btn.disabled = false;
+      }
+    }
+
+    document.getElementById("tech-open").addEventListener("click", openTechModal);
+    document.getElementById("tech-cancel").addEventListener("click", closeTechModal);
+    document.getElementById("tech-go").addEventListener("click", goToConsole);
+    techOverlay.addEventListener("click", e => { if (e.target === techOverlay) closeTechModal(); });
+
+    function tick() {
+      document.getElementById("clock").textContent =
+        new Date().toLocaleString("es-MX", {
+          weekday: "long", day: "numeric", month: "long",
+          hour: "2-digit", minute: "2-digit"
+        });
+    }
+    tick();
+    setInterval(tick, 30_000);
+  </script>
+</body>
+</html>

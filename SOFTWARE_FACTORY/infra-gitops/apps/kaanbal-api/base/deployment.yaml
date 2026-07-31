@@ -22,8 +22,13 @@ spec:
         ports:
         - containerPort: 8000
         env:
+        # kaanbal-api-runtime lo crea el instalador con kubectl y nunca se
+        # versiona: contiene la contraseña de MongoDB y la firma de los JWT.
         - name: MONGODB_URI
-          value: "mongodb://admin:CHANGEME_DB_PASSWORD@datastore:27017/forge?authSource=admin"
+          valueFrom:
+            secretKeyRef:
+              name: kaanbal-api-runtime
+              key: mongodb-uri
         - name: DOMAIN
           valueFrom:
             configMapKeyRef:
@@ -45,7 +50,10 @@ spec:
               name: kaanbal-system-config
               key: git.infra-repo
         - name: SECRET_KEY
-          value: "Ws6I4BI7n06yYAJCoYhfZpvTJf5lOTuyMbz8GVE9hdVatE9rR8JB8XybrWtHfds8"
+          valueFrom:
+            secretKeyRef:
+              name: kaanbal-api-runtime
+              key: secret-key
         resources:
           requests:
             cpu: 100m

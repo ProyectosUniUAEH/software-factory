@@ -68,7 +68,7 @@ class ArgoCDService:
             return None
 
         try:
-            async with httpx.AsyncClient(timeout=10.0, verify=False) as client:
+            async with httpx.AsyncClient(timeout=10.0, verify=False, follow_redirects=True) as client:
                 response = await client.post(
                     f"{config['server']}/api/v1/session",
                     json={
@@ -134,7 +134,7 @@ class ArgoCDService:
         Lista todas las aplicaciones en ArgoCD con resumen de estado
         """
         try:
-            async with httpx.AsyncClient(timeout=15.0, verify=False) as client:
+            async with httpx.AsyncClient(timeout=15.0, verify=False, follow_redirects=True) as client:
                 response = await self._request("GET", "/api/v1/applications", client)
                 if not response or response.status_code != 200:
                     return []
@@ -156,7 +156,7 @@ class ArgoCDService:
         - Historial de deployments
         """
         try:
-            async with httpx.AsyncClient(timeout=15.0, verify=False) as client:
+            async with httpx.AsyncClient(timeout=15.0, verify=False, follow_redirects=True) as client:
                 # Intentar con diferentes patrones de nombre
                 app_names_to_try = [
                     app_name,
@@ -185,7 +185,7 @@ class ArgoCDService:
         Muy útil para debugging - muestra exactamente qué está fallando
         """
         try:
-            async with httpx.AsyncClient(timeout=15.0, verify=False) as client:
+            async with httpx.AsyncClient(timeout=15.0, verify=False, follow_redirects=True) as client:
                 # Intentar con nombre-prod primero
                 for suffix in ["-prod", "-dev", "-staging", ""]:
                     name = f"{app_name}{suffix}" if suffix else app_name
@@ -203,7 +203,7 @@ class ArgoCDService:
     async def sync_application(self, app_name: str) -> dict:
         """Fuerza la sincronización de una aplicación"""
         try:
-            async with httpx.AsyncClient(timeout=30.0, verify=False) as client:
+            async with httpx.AsyncClient(timeout=30.0, verify=False, follow_redirects=True) as client:
                 # Intentar con nombre-prod
                 for suffix in ["-prod", "-dev", "-staging", ""]:
                     name = f"{app_name}{suffix}" if suffix else app_name
@@ -221,7 +221,7 @@ class ArgoCDService:
         Obtiene logs de los pods de una aplicación
         """
         try:
-            async with httpx.AsyncClient(timeout=30.0, verify=False) as client:
+            async with httpx.AsyncClient(timeout=30.0, verify=False, follow_redirects=True) as client:
                 params = {}
                 if pod_name:
                     params["podName"] = pod_name
@@ -410,7 +410,7 @@ class ArgoCDService:
         refresh_type = "hard" if hard else "normal"
 
         try:
-            async with httpx.AsyncClient(timeout=30.0, verify=False) as client:
+            async with httpx.AsyncClient(timeout=30.0, verify=False, follow_redirects=True) as client:
                 response = await self._request("GET", f"/api/v1/applications/{app_name}", client, params={"refresh": refresh_type})
                 if response and response.status_code == 200:
                     return {"success": True, "app": app_name, "refresh": refresh_type}
@@ -467,7 +467,7 @@ class ArgoCDService:
         argo_name = f"{app_name}-{env}"
 
         try:
-            async with httpx.AsyncClient(timeout=10.0, verify=False) as client:
+            async with httpx.AsyncClient(timeout=10.0, verify=False, follow_redirects=True) as client:
                 response = await self._request("GET", f"/api/v1/applications/{argo_name}", client)
                 if response and response.status_code == 200:
                     app = response.json()

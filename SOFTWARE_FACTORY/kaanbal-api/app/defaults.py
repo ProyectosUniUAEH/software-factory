@@ -29,10 +29,21 @@ TAILSCALE_API_BASE = "https://api.tailscale.com/api/v2"
 TAILSCALE_OAUTH_URL = "https://api.tailscale.com/api/v2/oauth/token"
 
 # -- ArgoCD --
-# Use in-cluster DNS name instead of fixed ClusterIP (IP changes per deploy)
-# HTTP because helm installs ArgoCD with server.insecure=true (no TLS inside cluster)
-ARGOCD_SERVER = "http://argocd-server.argocd.svc.cluster.local"
+# In-cluster DNS (not ClusterIP — that changes per deploy).
+# ArgoCD Helm chart exposes 80 and 443; plain HTTP on :80 returns 307 → HTTPS,
+# which breaks session POST unless the client follows redirects or uses :443.
+ARGOCD_SERVER = "https://argocd-server.argocd.svc.cluster.local:443"
 ARGOCD_USERNAME = "admin"
+
+# -- Ingress --
+# k3s ships Traefik as the default IngressClass. Declaring a class with no
+# controller behind it produces Ingresses that are accepted by the API server
+# but never serve traffic, which looks like a broken app for no visible reason.
+# The installer writes the real class into system_config; this is the fallback.
+INGRESS_CLASS = "traefik"
+# Empty means TLS is terminated at the edge (Cloudflare Tunnel) and cert-manager
+# is not involved. Set to e.g. "letsencrypt-prod" only when issuing in-cluster.
+INGRESS_CLUSTER_ISSUER = ""
 
 # -- Workspace --
 WORKSPACE_PATH = "/tmp/kaanbal-workdir"
@@ -64,13 +75,15 @@ GITHUB_API_BASE = "https://api.github.com"
 # devtools:   VPN only
 # workflow:   VPN or public (webhooks need public)
 # iot:        internal, VPN, or public
+# Allowed exposure modes per template category (lifecycle bitácora Fase 0).
+# `off` is always allowed at switch-time even if omitted here for create defaults.
 EXPOSURE_RULES = {
-    "frontend":   ["public", "tailscale"],          # UI: public or VPN (no internal, no 'both')
-    "backend":    ["internal", "tailscale", "public"], # APIs: full flexibility per-env
-    "database":   ["internal", "tailscale"],           # DBs: NEVER expose publicly
-    "monitoring": ["tailscale"],                       # Admin: VPN only
-    "devtools":   ["tailscale"],                       # Admin: VPN only
-    "workflow":   ["tailscale", "public"],             # n8n: webhooks=public, UI=VPN
-    "iot":        ["internal", "tailscale", "public"],  # IoT: all single modes
+    "frontend":   ["public", "tailscale", "lan", "off"],
+    "backend":    ["internal", "tailscale", "public", "lan", "off"],
+    "database":   ["internal", "tailscale", "lan", "off"],  # NEVER public
+    "monitoring": ["tailscale", "lan", "off"],
+    "devtools":   ["tailscale", "lan", "off"],
+    "workflow":   ["tailscale", "public", "lan", "off"],  # v1: full channel per env (no Mixed in create UI)
+    "iot":        ["internal", "tailscale", "public", "lan", "off"],
 }
-EXPOSURE_RULES_DEFAULT = ["internal", "tailscale", "public"]
+EXPOSURE_RULES_DEFAULT = ["internal", "tailscale", "public", "lan", "off"]

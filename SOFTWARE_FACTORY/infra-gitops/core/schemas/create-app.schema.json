@@ -59,9 +59,17 @@
       "properties": {
         "type": {
           "type": "string",
-          "enum": ["public", "private", "internal"],
-          "default": "private",
-          "description": "public=internet, private=tailscale, internal=cluster-only"
+          "enum": ["public", "tailscale", "both", "lan", "internal", "off"],
+          "default": "internal",
+          "description": "public=HTTPS+subdomain, tailscale=MagicDNS, lan=NodePort LAN, internal=cluster-only, off=stopped, both=mixed paths"
+        },
+        "per_env": {
+          "type": "object",
+          "additionalProperties": {
+            "type": "string",
+            "enum": ["public", "tailscale", "both", "lan", "internal", "off"]
+          },
+          "description": "Per-environment exposure override (dev/staging/prod)"
         },
         "subdomain": {
           "type": "string",

@@ -249,10 +249,16 @@ class SetupInstallRequest(BaseModel):
     cloudflare_zone_id: str = ""
     cloudflare_tunnel_id: str = ""
     argocd_password: str = ""
+    argocd_server: str = ""
     vault_addr: str = ""
     vault_token: str = ""
     vault_hostname: str = ""
     cluster_ssh_host: str = ""
+    # IngressClass realmente instalada (k3s = traefik). Si no coincide con un
+    # controlador vivo, las apps se despliegan pero nadie sirve su tráfico.
+    ingress_class: str = ""
+    # Vacío = TLS terminado en el edge (Cloudflare Tunnel), sin cert-manager.
+    ingress_cluster_issuer: str = ""
     admin_user: str
     admin_password: str
 
@@ -359,6 +365,8 @@ async def run_full_install(request: SetupInstallRequest):
         config_update["cloudflare_tunnel_id"] = request.cloudflare_tunnel_id
     if request.argocd_password:
         config_update["argocd_password"] = request.argocd_password
+    if request.argocd_server:
+        config_update["argocd_server"] = request.argocd_server
     if request.vault_token:
         config_update["vault_token"] = request.vault_token
     if request.vault_addr:
@@ -367,6 +375,11 @@ async def run_full_install(request: SetupInstallRequest):
         config_update["vault_hostname"] = request.vault_hostname
     if request.cluster_ssh_host:
         config_update["cluster_ssh_host"] = request.cluster_ssh_host
+    if request.ingress_class:
+        config_update["ingress_class"] = request.ingress_class
+    # Se escribe siempre (incluso vacío): "sin cert-manager" es una decisión
+    # explícita del instalador, no una ausencia de configuración.
+    config_update["ingress_cluster_issuer"] = request.ingress_cluster_issuer
 
     await db.system_config.update_one(
         {"_id": "main"},
@@ -496,4 +509,73 @@ async def create_cloudflare_tunnel(
         "tunnel_id": tunnel_id,
         "dns_records": dns_created,
         "message": f"Tunnel created. DNS: {', '.join(dns_created)}"
+    }
+
+
+class BootstrapCoreCIRequest(BaseModel):
+    repos: list[str] = ["kaanbal-api", "kaanbal-console"]
+
+
+@router.post("/bootstrap-core-ci")
+async def bootstrap_core_ci(request: BootstrapCoreCIRequest):
+    """Inyecta los secrets de GitHub Actions en los repos del core.
+
+    El instalador construye la primera imagen dentro del cluster, pero a partir
+    de ahí quien publica es el workflow de cada repo — y no puede hacerlo sin
+    credenciales de Docker Hub ni permiso para escribir en infra-gitops.
+
+    Lo hace el API y no el instalador porque cifrar un secret de Actions exige
+    un sealed box de libsodium (PyNaCl), que aquí sí está disponible; el
+    instalador corre solo con la stdlib de Python.
+
+    Endpoint público como el resto del bootstrap: solo funciona mientras la
+    plataforma tenga credenciales de Git y Docker Hub ya sembradas.
+    """
+    db = get_db()
+    config = await db.system_config.find_one({"_id": "main"}) or {}
+
+    git_token = config.get("github_token") or config.get("git_token", "")
+    workspace = config.get("github_org") or config.get("bitbucket_workspace", "")
+    docker_user = config.get("dockerhub_username", "")
+    docker_token = config.get("dockerhub_token", "")
+
+    missing = [name for name, value in [
+        ("git_token", git_token), ("github_org", workspace),
+        ("dockerhub_username", docker_user), ("dockerhub_token", docker_token),
+    ] if not value]
+    if missing:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Faltan credenciales en system_config: {', '.join(missing)}")
+
+    from app.services.git_provider import get_git_provider
+
+    provider = get_git_provider("github", {
+        "git_user": config.get("git_username", ""),
+        "git_token": git_token,
+        "github_org": workspace,
+        "github_token": git_token,
+        "github_is_org": config.get("github_is_org"),
+    })
+
+    # El workflow de cada repo core usa estos nombres (ver build-deploy.yml).
+    variables = [
+        {"key": "DOCKERHUB_USERNAME", "value": docker_user, "secured": True},
+        {"key": "DOCKERHUB_TOKEN", "value": docker_token, "secured": True},
+        {"key": "INFRA_GIT_USER", "value": "x-access-token", "secured": True},
+        {"key": "INFRA_GIT_TOKEN", "value": git_token, "secured": True},
+    ]
+
+    configured, failed = [], {}
+    for repo in request.repos:
+        try:
+            await provider.set_ci_variables(repo, variables)
+            configured.append(repo)
+        except Exception as exc:
+            failed[repo] = str(exc)[:200]
+
+    return {
+        "status": "success" if not failed else "partial",
+        "configured": configured,
+        "failed": failed,
     }

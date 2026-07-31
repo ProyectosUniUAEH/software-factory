@@ -4,20 +4,44 @@ La primera impresión de la plataforma: un instalador web guiado por **Acuaponsi
 que convierte cualquier Linux (laptop WSL2, VPS Contabo, instancia cloud) en una
 célula Kaanbal — con la misma UX en todos lados, estilo Contabo: IP + puerto + token.
 
-## Uso
+## Uso recomendado (Ubuntu Server)
 
 ```bash
-python3 installer/server.py
-# imprime:  http://localhost:3000/?token=<token-de-sesión>
-# en VPS:   http://<IP>:3000/?token=<token>
+git clone https://github.com/ProyectosUniUAEH/software-factory.git
+cd software-factory/SOFTWARE_FACTORY
+sudo bash ./install.sh
+# opcional: preimportar credenciales
+sudo bash ./install.sh --env /ruta/segura/.env
 ```
 
-**Cero dependencias** — solo Python 3 stdlib. Nada de pip en la máquina del usuario.
+El bootstrap pide privilegios una sola vez, crea un servicio systemd temporal y
+muestra `http://<IP>:3000/?token=<token-temporal>`. El wizard instala k3s,
+ArgoCD, los repos core y la conectividad. Cuando el administrador confirma su
+usuario y contraseña, el token se revoca y el servicio privilegiado se apaga.
+
+**Cero dependencias Python** — el backend usa solo stdlib.
+
+## Reset de laboratorio
+
+```bash
+# Reinstalar desde cero conservando credenciales y recursos externos
+sudo bash ./install.sh --reset-local --preserve-credentials
+
+# Reinstalar y borrar también las credenciales locales
+sudo bash ./install.sh --reset-local --wipe-credentials
+```
+
+El reset local nunca elimina repos GitHub, túneles/DNS Cloudflare, tokens Docker
+Hub ni clientes Tailscale. Esos recursos requieren una operación externa
+separada y con allowlist explícita.
+
+Credenciales persistentes: `/etc/kaanbal/installer.env` (`root:root`, modo 600).
+Estado recuperable: `/var/lib/kaanbal-installer/state.json`.
 
 ## Flujo
 
-1. **Bienvenida** — chequeo del sistema en vivo (RAM, CPU, disco, systemd, WSL,
-   k3s/ArgoCD ya presentes). Acuaponsito saluda (clip de video).
+1. **Bienvenida** — chequeo del sistema en vivo (RAM, CPU, disco, systemd,
+   privilegios temporales, k3s/ArgoCD).
 2. **Conectividad** — recomienda fuerte *dominio propio + Cloudflare Tunnel*
    (la digitalización necesita nube desde el día uno), pero permite modo
    local/VPN sin fricción. Validaciones reales contra las APIs de Cloudflare,
@@ -26,7 +50,7 @@ python3 installer/server.py
    Los pasos son **idempotentes**: detectan lo ya instalado y lo marcan hecho,
    así el instalador también sirve como panel de verificación/reparación.
 4. **Modo operativo** — credenciales de ArgoCD, port-forward automático,
-   siguientes pasos. Handoff sin fricción.
+   confirmación del acceso administrativo y revocación del instalador.
 
 ## Acuaponsito
 
@@ -42,7 +66,9 @@ success / error.
   el límite de 262KB de la anotación `last-applied-configuration`.
 - `systemctl is-system-running` acepta `degraded` (WSL2 reporta eso a veces).
 - Espera de rollout con timeout largo (primera descarga de imágenes es lenta).
-- Token de sesión obligatorio en toda la API (como el instalador de Contabo).
+- Token temporal obligatorio en toda la API; se revoca al cerrar el handoff.
+- El wizard corre como root únicamente dentro de una unidad systemd temporal.
+- No se configura `NOPASSWD:ALL`.
 
 ## Arquitectura
 

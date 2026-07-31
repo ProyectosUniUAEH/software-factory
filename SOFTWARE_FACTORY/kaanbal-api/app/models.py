@@ -5,10 +5,21 @@ from enum import Enum
 
 
 class ExposureType(str, Enum):
+    """Modos de exposición por ambiente (ver docs/EXPOSURE_LIFECYCLE_BITACORA.md).
+
+    public     → Ingress + Cloudflare HTTPS + subdominio
+    tailscale  → MagicDNS VPN
+    lan        → NodePort / IP de red local del nodo
+    internal   → solo ClusterIP {app}.{env}.svc.cluster.local
+    off        → sin expositores + replicas=0
+    both       → atajo multi-superficie (paths públicos + resto VPN)
+    """
     PUBLIC = "public"
     TAILSCALE = "tailscale"
     BOTH = "both"
     INTERNAL = "internal"
+    LAN = "lan"
+    OFF = "off"
 
 
 class User(BaseModel):

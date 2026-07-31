@@ -15,5 +15,5 @@ patchesStrategicMerge:
 
 images:
   - name: kaanbal-console-image
-    newName: andresupmh/kaanbal-console
+    newName: DOCKERHUB_USER/kaanbal-console
     newTag: latest

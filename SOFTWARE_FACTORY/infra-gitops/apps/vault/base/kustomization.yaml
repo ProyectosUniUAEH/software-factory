@@ -7,5 +7,7 @@ resources:
   - configmap.yaml
   - pvc.yaml
   - rbac.yaml
+# @kaanbal:if TAILSCALE
   - ingress-tailscale.yaml
+# @kaanbal:endif
   - vault-auto-init-job.yaml

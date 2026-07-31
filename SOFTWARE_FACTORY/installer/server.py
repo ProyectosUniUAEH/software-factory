@@ -27,9 +27,20 @@ import urllib.error
 import urllib.parse
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+import corebuild            # noqa: E402  builder in-cluster de las imágenes core
+import gitops_publish       # noqa: E402  publicación idempotente de los repos
+import gitops_render        # noqa: E402  render del baseline con el dominio real
+
 PORT = int(os.environ.get("KAANBAL_INSTALLER_PORT", "3000"))
 TOKEN = os.environ.get("KAANBAL_INSTALLER_TOKEN") or secrets.token_urlsafe(18)
 STATIC_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "static")
+STATE_DIR = os.environ.get("KAANBAL_INSTALLER_STATE_DIR") or os.path.expanduser("~/.kaanbal/installer")
+STATE_FILE = os.path.join(STATE_DIR, "state.json")
+CREDENTIALS_FILE = os.environ.get("KAANBAL_CREDENTIALS_FILE") or os.path.expanduser("~/.kaanbal/env")
+PRIVILEGED = getattr(os, "geteuid", lambda: -1)() == 0 or os.environ.get("KAANBAL_INSTALLER_PRIVILEGED") == "1"
+TOKEN_REVOKED = False
+os.makedirs(STATE_DIR, mode=0o700, exist_ok=True)
 
 # Carpeta del Framework Acuaponsito (catálogo + clips). El repertorio crece
 # sin redeploy: tirar un mp4 + editar catalog.json ya lo hace disponible.
@@ -116,13 +127,190 @@ EVENT_Q = queue.Queue()
 INSTALLING = False
 PORT_FORWARD_PROC = None
 
-STEP_IDS = ["sistema", "k3s", "nodo", "argocd", "ia", "cloudflared", "gitops", "acceso"]
+STEP_IDS = ["sistema", "k3s", "nodo", "argocd", "ia", "cloudflared",
+            "repos", "imagenes", "gitops", "plataforma", "acceso"]
+
+# Subdominios del engine. Todo el núcleo vive bajo el prefijo "kaanbal-" para
+# que una app de usuario (fago, fago-api…) no pueda ocupar por accidente el
+# nombre de un servicio del control plane.
+CORE_HOSTS = {
+    "console": "kaanbal-console",   # UI para desplegar aplicaciones
+    "api": "kaanbal-api",           # API del engine
+    "argocd": "kaanbal-argo",       # ArgoCD
+    "agent": "kaanbal-agent",       # Acuaponsito, el agente global
+}
+# Atajo cómodo hacia la consola. El nombre canónico es kaanbal-console.
+CONSOLE_SHORTCUT = "kaanbal"
+# Nombre anterior de ArgoCD: se sigue enrutando para no romper enlaces guardados.
+LEGACY_ARGOCD_HOST = "argocd"
 STATE = {
     "steps": {sid: {"status": "pending", "detail": ""} for sid in STEP_IDS},
     "phase": "idle",          # idle | installing | done | error
     "handoff": {},            # argocd_url, password, kubeconfig, node
     "sysinfo": {},
 }
+
+# Las claves se comparan en MAYÚSCULAS: un .env escrito a mano mezcla estilos
+# (`domain=`, `github_org=`, `DOCKER_USER=`) y descartar una credencial por la
+# caja de sus letras produce instalaciones a medias muy difíciles de explicar.
+ENV_TO_CONFIG = {
+    "DOMAIN": "domain", "KB_DOMAIN": "domain",
+    "CF_TOKEN": "cf_token", "KB_CLOUDFLARE_TOKEN": "cf_token",
+    "CLOUDFLARE_TOKEN": "cf_token",
+    "CF_ACCOUNT_ID": "cf_account", "KB_CLOUDFLARE_ACCOUNT_ID": "cf_account",
+    "CLOUDFLARE_ACCOUNT_ID": "cf_account",
+    "TUNNEL_TOKEN": "tunnel_token",
+    "GITOPS_URL": "gitops_url",
+    "GITOPS_TOKEN": "gitops_token", "KB_GIT_TOKEN": "gitops_token",
+    "GITHUB_TOKEN": "gitops_token", "GH_TOKEN": "gitops_token",
+    "GITHUB_ORG": "github_org", "KB_GIT_ORG": "github_org",
+    "GITHUB_WORKSPACE_ORG": "github_org",
+    "GITHUB_LOGIN": "github_login", "GITHUB_USER": "github_login",
+    "DOCKER_USER": "docker_user", "KB_DOCKER_USER": "docker_user",
+    "DOCKERHUB_USER": "docker_user", "DOCKERHUB_USERNAME": "docker_user",
+    "DOCKER_TOKEN": "docker_token", "KB_DOCKER_TOKEN": "docker_token",
+    "DOCKERHUB_TOKEN": "docker_token",
+    "TAILSCALE_CLIENT_ID": "tailscale_id", "KB_TAILSCALE_CLIENT_ID": "tailscale_id",
+    "TAILSCALE_CLIENT_SECRET": "tailscale_secret", "KB_TAILSCALE_CLIENT_SECRET": "tailscale_secret",
+    "TAILSCALE_DNS_SUFFIX": "tailscale_dns", "TAILSCALE_DNS_MAGIC": "tailscale_dns",
+    "TAILSCALE_DNS": "tailscale_dns",
+    "KAANBAL_ADMIN_USER": "admin_user",
+    "KAANBAL_ADMIN_PASS": "admin_pass",
+    # El primer usuario de la consola es también con quien habla Acuaponsito,
+    # así que `agente-*` y `admin_*` nombran la misma cuenta.
+    "AGENTE_USER": "admin_user", "AGENTE-USER": "admin_user",
+    "AGENT_USER": "admin_user",
+    "AGENTE_PASSWORD": "admin_pass", "AGENTE-PASSWORD": "admin_pass",
+    "AGENT_PASSWORD": "admin_pass",
+    # Forma de operar la célula: el wizard las pregunta, en desatendido vienen
+    # del archivo.
+    "KAANBAL_MODE": "mode", "MODE": "mode",
+    "KAANBAL_CONSOLE_EXPOSURE": "console_exposure",
+    "CONSOLE_EXPOSURE": "console_exposure",
+    "KAANBAL_API_EXPOSURE": "api_exposure",
+    "API_EXPOSURE": "api_exposure",
+    "KAANBAL_AGENT_EXPOSURE": "agent_exposure",
+    "AGENT_EXPOSURE": "agent_exposure",
+    # Vacío = construir las imágenes del engine desde el código fuente.
+    "KAANBAL_CORE_VERSION": "core_version", "CORE_VERSION": "core_version",
+    # Claves de los proveedores de IA del agente.
+    "DEEPSEEK_API_KEY": "deepseek_api_key",
+    "OPENAI_API_KEY": "openai_api_key",
+    "ANTHROPIC_API_KEY": "anthropic_api_key",
+}
+CONFIG_TO_ENV = {
+    "domain": "DOMAIN", "cf_token": "CF_TOKEN", "cf_account": "CF_ACCOUNT_ID",
+    "tunnel_token": "TUNNEL_TOKEN", "gitops_url": "GITOPS_URL",
+    "gitops_token": "GITOPS_TOKEN", "github_org": "GITHUB_ORG",
+    "github_login": "GITHUB_LOGIN",
+    "docker_user": "DOCKER_USER", "docker_token": "DOCKER_TOKEN",
+    "tailscale_id": "TAILSCALE_CLIENT_ID", "tailscale_secret": "TAILSCALE_CLIENT_SECRET",
+    "tailscale_dns": "TAILSCALE_DNS_SUFFIX", "admin_user": "KAANBAL_ADMIN_USER",
+    "admin_pass": "KAANBAL_ADMIN_PASS",
+    "mode": "KAANBAL_MODE", "console_exposure": "KAANBAL_CONSOLE_EXPOSURE",
+    "api_exposure": "KAANBAL_API_EXPOSURE", "agent_exposure": "KAANBAL_AGENT_EXPOSURE",
+    "core_version": "KAANBAL_CORE_VERSION",
+    "deepseek_api_key": "DEEPSEEK_API_KEY", "openai_api_key": "OPENAI_API_KEY",
+    "anthropic_api_key": "ANTHROPIC_API_KEY",
+}
+SECRET_CONFIG_KEYS = {
+    "cf_token", "tunnel_token", "gitops_token", "docker_token",
+    "tailscale_secret", "admin_pass",
+    "deepseek_api_key", "openai_api_key", "anthropic_api_key",
+}
+
+# Clave del archivo que guarda la API key de cada proveedor de IA soportado.
+AI_KEY_CONFIG = {
+    "deepseek": "deepseek_api_key",
+    "openai": "openai_api_key",
+    "anthropic": "anthropic_api_key",
+}
+
+
+def _state_snapshot():
+    """Estado recuperable sin credenciales ni contraseñas de handoff."""
+    snapshot = json.loads(json.dumps(STATE))
+    snapshot.pop("ai_providers", None)
+    if "handoff" in snapshot:
+        snapshot["handoff"].pop("argocd_password", None)
+    return snapshot
+
+
+def persist_state():
+    try:
+        tmp = STATE_FILE + ".tmp"
+        with open(tmp, "w", encoding="utf-8") as f:
+            json.dump(_state_snapshot(), f, ensure_ascii=False, indent=2)
+        os.chmod(tmp, 0o600)
+        os.replace(tmp, STATE_FILE)
+    except Exception as e:
+        print(f"[state] no se pudo persistir: {e}", file=sys.stderr)
+
+
+def load_persisted_state():
+    try:
+        with open(STATE_FILE, encoding="utf-8") as f:
+            saved = json.load(f)
+        if isinstance(saved, dict):
+            STATE.update({k: v for k, v in saved.items() if k in STATE})
+            if STATE.get("phase") == "installing":
+                STATE["phase"] = "error"
+    except (FileNotFoundError, json.JSONDecodeError):
+        pass
+
+
+def parse_env_text(text):
+    values = {}
+    for raw in (text or "").splitlines():
+        line = raw.strip()
+        if not line or line.startswith("#") or "=" not in line:
+            continue
+        key, value = line.split("=", 1)
+        key = key.strip()
+        if key.lower().startswith("export "):
+            key = key[7:].strip()
+        key = key.upper()
+        value = value.strip().strip("'\"")
+        config_key = ENV_TO_CONFIG.get(key)
+        if config_key and value:
+            values[config_key] = value
+    return values
+
+
+def load_credentials():
+    try:
+        with open(CREDENTIALS_FILE, encoding="utf-8") as f:
+            return parse_env_text(f.read())
+    except FileNotFoundError:
+        return {}
+
+
+def save_credentials(config):
+    current = load_credentials()
+    current.update({k: str(v) for k, v in config.items() if k in CONFIG_TO_ENV and v is not None})
+    os.makedirs(os.path.dirname(CREDENTIALS_FILE), mode=0o700, exist_ok=True)
+    tmp = CREDENTIALS_FILE + ".tmp"
+    with open(tmp, "w", encoding="utf-8") as f:
+        f.write("# Kaanbal installer credentials - root only\n")
+        for key, env_name in CONFIG_TO_ENV.items():
+            value = current.get(key, "")
+            safe = str(value).replace("\n", "").replace("\r", "")
+            f.write(f"{env_name}={safe}\n")
+    os.chmod(tmp, 0o600)
+    os.replace(tmp, CREDENTIALS_FILE)
+    return current
+
+
+def credentials_status():
+    creds = load_credentials()
+    return {
+        "configured": sorted(k for k, v in creds.items() if v),
+        "secret_configured": sorted(k for k in SECRET_CONFIG_KEYS if creds.get(k)),
+        "values": {k: v for k, v in creds.items() if k not in SECRET_CONFIG_KEYS},
+    }
+
+
+load_persisted_state()
 
 
 def emit(kind, **payload):
@@ -134,6 +322,7 @@ def emit(kind, **payload):
     # persistir en la memoria del agente (sin el ruido de stdout crudo)
     if not (kind == "log" and payload.get("level") in ("out", "cmd")):
         remember("installer", kind, **payload)
+    persist_state()
 
 
 def log(line, level="info"):
@@ -153,9 +342,24 @@ def set_phase(phase):
 
 
 # ------------------------------------------------------------ shell helpers ---
+def redact(value):
+    text = str(value or "")
+    candidates = [TOKEN]
+    try:
+        creds = load_credentials()
+        candidates.extend(creds.get(k, "") for k in SECRET_CONFIG_KEYS)
+    except Exception:
+        pass
+    for secret in sorted((s for s in candidates if s), key=len, reverse=True):
+        text = text.replace(secret, "***")
+        text = text.replace(urllib.parse.quote(secret, safe=""), "***")
+    text = re.sub(r"(https://[^:/@\s]+:)[^@\s]+(@)", r"\1***\2", text)
+    return text
+
+
 def run(cmd, timeout=120, stream=False):
     """Ejecutar comando; si stream=True, mandar stdout línea a línea al log."""
-    log(f"$ {cmd}", "cmd")
+    log(f"$ {redact(cmd)}", "cmd")
     proc = subprocess.Popen(
         cmd, shell=True, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
         text=True, bufsize=1,
@@ -171,8 +375,8 @@ def run(cmd, timeout=120, stream=False):
         proc.wait(timeout=timeout)
     except subprocess.TimeoutExpired:
         proc.kill()
-        raise RuntimeError(f"Timeout ({timeout}s): {cmd}")
-    return proc.returncode, "\n".join(lines)
+        raise RuntimeError(f"Timeout ({timeout}s): {redact(cmd)}")
+    return proc.returncode, redact("\n".join(lines))
 
 
 def kubectl(args, timeout=60, stream=False):
@@ -180,7 +384,7 @@ def kubectl(args, timeout=60, stream=False):
 
 
 # ------------------------------------------------------------- validaciones ---
-def http_json(url, headers=None, data=None, auth=None, timeout=15):
+def http_json(url, headers=None, data=None, auth=None, timeout=15, method=""):
     req = urllib.request.Request(url, headers=headers or {})
     if auth:
         import base64
@@ -189,6 +393,8 @@ def http_json(url, headers=None, data=None, auth=None, timeout=15):
     if data is not None:
         req.data = data.encode() if isinstance(data, str) else data
         req.method = "POST"
+    if method:
+        req.method = method
     try:
         with urllib.request.urlopen(req, timeout=timeout) as resp:
             return resp.status, json.loads(resp.read().decode() or "{}")
@@ -273,12 +479,16 @@ def create_cloudflare_tunnel(token, account_id, domain, hostname, log_fn=None):
         tunnel_token = cr["result"].get("token")
         say(f"Túnel creado en Cloudflare: {tunnel_name}", "ok")
 
-    # ingress: argocd → server TLS; wildcard + raíz → Traefik de k3s (:80)
+    # ArgoCD necesita regla propia porque habla HTTPS con certificado interno;
+    # el resto del dominio entra por Traefik, que ya enruta por Ingress.
     traefik = "http://traefik.kube-system.svc.cluster.local:80"
+    argocd_backend = {
+        "service": "https://argocd-server.argocd.svc.cluster.local:443",
+        "originRequest": {"noTLSVerify": True},
+    }
     ingress = [
-        {"hostname": f"argocd.{domain}",
-         "service": "https://argocd-server.argocd.svc.cluster.local:443",
-         "originRequest": {"noTLSVerify": True}},
+        {"hostname": f"{CORE_HOSTS['argocd']}.{domain}", **argocd_backend},
+        {"hostname": f"{LEGACY_ARGOCD_HOST}.{domain}", **argocd_backend},
         {"hostname": f"*.{domain}", "service": traefik},
         {"hostname": domain, "service": traefik},
         {"service": "http_status:404"},
@@ -294,7 +504,9 @@ def create_cloudflare_tunnel(token, account_id, domain, hostname, log_fn=None):
     dns = []
     if zone_id:
         target = f"{tunnel_id}.cfargotunnel.com"
-        for name in [f"*.{domain}", domain, f"argocd.{domain}"]:
+        for name in [f"*.{domain}", domain,
+                     f"{CORE_HOSTS['argocd']}.{domain}",
+                     f"{LEGACY_ARGOCD_HOST}.{domain}"]:
             ste, ex = _cf("GET", f"{cf}/zones/{zone_id}/dns_records?type=CNAME&name={urllib.parse.quote(name)}", token)
             recs = ex.get("result", []) if ste == 200 else []
             rec = {"type": "CNAME", "name": name, "content": target, "proxied": True}
@@ -309,58 +521,327 @@ def create_cloudflare_tunnel(token, account_id, domain, hostname, log_fn=None):
     return {"tunnel_id": tunnel_id, "tunnel_token": tunnel_token, "dns": dns, "zone_id": zone_id}
 
 
+# Sin llaves de flujo YAML a propósito: este texto se escribe tal cual, no pasa
+# por str.format(), y unas llaves dobles heredadas de una plantilla producían un
+# manifiesto inválido que kubectl rechazaba en silencio.
 CLOUDFLARED_DEPLOYMENT = """apiVersion: apps/v1
 kind: Deployment
 metadata:
   name: cloudflared
   namespace: prod
-  labels: {{app: cloudflared, app.kubernetes.io/part-of: kaanbal}}
+  labels:
+    app: cloudflared
+    app.kubernetes.io/part-of: kaanbal
 spec:
   replicas: 1
   selector:
-    matchLabels: {{app: cloudflared}}
+    matchLabels:
+      app: cloudflared
   template:
     metadata:
-      labels: {{app: cloudflared}}
+      labels:
+        app: cloudflared
     spec:
       containers:
         - name: cloudflared
           image: cloudflare/cloudflared:latest
-          args: [tunnel, --no-autoupdate, --metrics, "0.0.0.0:2000", run]
+          args: ["tunnel", "--no-autoupdate", "--metrics", "0.0.0.0:2000", "run"]
           env:
             - name: TUNNEL_TOKEN
               valueFrom:
-                secretKeyRef: {{name: cloudflared-secrets, key: TUNNEL_TOKEN}}
+                secretKeyRef:
+                  name: cloudflared-secrets
+                  key: TUNNEL_TOKEN
           ports:
-            - {{containerPort: 2000, name: metrics}}
+            - containerPort: 2000
+              name: metrics
           resources:
-            requests: {{cpu: 10m, memory: 64Mi}}
-            limits: {{cpu: 200m, memory: 128Mi}}
+            requests:
+              cpu: 10m
+              memory: 64Mi
+            limits:
+              cpu: 200m
+              memory: 128Mi
           livenessProbe:
-            httpGet: {{path: /ready, port: 2000}}
+            httpGet:
+              path: /ready
+              port: 2000
             initialDelaySeconds: 10
             periodSeconds: 10
             failureThreshold: 3
 """
 
 
-def validate_github(token):
-    status, user = http_json("https://api.github.com/user",
-                             {"Authorization": f"token {token}", "Accept": "application/vnd.github.v3+json"})
+def _github_headers(token):
+    """Classic PAT (ghp_…) y fine-grained (github_pat_…) usan prefijos distintos."""
+    t = (token or "").strip()
+    auth = f"token {t}" if t.startswith(("ghp_", "gho_", "ghu_", "ghs_", "ghr_")) else f"Bearer {t}"
+    return {
+        "Authorization": auth,
+        "Accept": "application/vnd.github+json",
+        "X-GitHub-Api-Version": "2022-11-28",
+    }
+
+
+# Raíz SOFTWARE_FACTORY (installer/..) — fuente local para bootstrap de repos core
+SF_ROOT = os.path.normpath(os.path.join(os.path.dirname(os.path.abspath(__file__)), ".."))
+# Fuente de verdad GitOps: repos mínimos que la célula reconcilia vía ramas/overlays
+GITHUB_CORE_REPOS = (
+    ("infra-gitops", True),
+    ("kaanbal-api", True),
+    ("kaanbal-console", True),
+    ("kaanbal-agent", True),
+    ("kaanbal-templates", True),
+)
+
+
+def _github_api(method, path, token, body=None, timeout=25):
+    headers = _github_headers(token)
+    url = f"https://api.github.com{path}"
+    data = None
+    if body is not None:
+        headers = {**headers, "Content-Type": "application/json"}
+        data = json.dumps(body).encode()
+    req = urllib.request.Request(url, headers=headers, data=data, method=method.upper())
+    try:
+        with urllib.request.urlopen(req, timeout=timeout) as resp:
+            raw = resp.read().decode() or "{}"
+            return resp.status, json.loads(raw) if raw.strip() else {}
+    except urllib.error.HTTPError as e:
+        try:
+            return e.code, json.loads(e.read().decode() or "{}")
+        except Exception:
+            return e.code, {}
+    except Exception as e:
+        return 0, {"error": str(e)}
+
+
+def _github_can_bootstrap(token, org, login):
+    """¿Puede crear repos en la org/cuenta elegida?"""
+    if org.lower() == login.lower():
+        return True, "cuenta personal"
+    st, mem = _github_api("GET", f"/user/memberships/orgs/{org}", token)
+    if st == 200 and mem.get("state") == "active":
+        role = mem.get("role", "member")
+        return role == "admin", role
+    return False, "sin membresía activa"
+
+
+def _scan_github_core_repos(token, org):
+    existing, missing = [], []
+    headers = _github_headers(token)
+    for name, required in GITHUB_CORE_REPOS:
+        st, _ = http_json(f"https://api.github.com/repos/{org}/{name}", headers)
+        local_ok = os.path.isdir(os.path.join(SF_ROOT, name))
+        if st == 200:
+            existing.append(name)
+        elif required or local_ok:
+            missing.append(name)
+    return existing, missing
+
+
+def _push_local_repo(token, org, repo_name, local_path, log_fn=None):
+    import tempfile
+    work = tempfile.mkdtemp(prefix=f"kaanbal-bootstrap-{repo_name}-")
+    try:
+        ignore = shutil.ignore_patterns(".git", "__pycache__", "node_modules", ".venv")
+        shutil.copytree(local_path, os.path.join(work, "src"), ignore=ignore)
+        auth = urllib.parse.quote(token, safe="")
+        auth_url = f"https://x-access-token:{auth}@github.com/{org}/{repo_name}.git"
+        steps = [
+            f"cd '{work}/src' && git init -b main",
+            f"cd '{work}/src' && git config user.email 'kaanbal@local'",
+            f"cd '{work}/src' && git config user.name 'Kaanbal Installer'",
+            f"cd '{work}/src' && git add -A",
+            f"cd '{work}/src' && git commit -m 'bootstrap: kaanbal {repo_name} from installer'",
+            f"cd '{work}/src' && git remote add origin '{auth_url}'",
+            f"cd '{work}/src' && git push -u origin main",
+        ]
+        for cmd in steps:
+            rc, out = run(cmd, timeout=300)
+            if "commit" in cmd and rc != 0 and ("nothing to commit" in out or "nothing added" in out):
+                continue
+            if rc != 0:
+                return f"Falló push de {repo_name}: {(out or '')[:400]}"
+        if log_fn:
+            log_fn(f"Código inicial publicado en {org}/{repo_name}", "ok")
+        return None
+    finally:
+        shutil.rmtree(work, ignore_errors=True)
+
+
+def bootstrap_github_core(token, org, login, log_fn=None, create_only=False):
+    """Crea los repos core que falten en GitHub.
+
+    Con `create_only` se limita a crearlos vacíos: el contenido lo publica
+    después `gitops_publish`, que sabe distinguir entre sembrar un repo nuevo y
+    refrescar el baseline de uno que ya está en uso.
+    """
+    def say(msg, level="info"):
+        if log_fn:
+            log_fn(msg, level)
+
+    existing, missing = _scan_github_core_repos(token, org)
+    if not missing:
+        return {"ok": True, "created": [], "existing": existing, "missing": []}
+
+    can, role = _github_can_bootstrap(token, org, login)
+    if not can:
+        return {
+            "ok": False,
+            "error": (f"Faltan repos en {org} ({', '.join(missing)}) y tu token no puede crearlos "
+                      f"(rol: {role}). Usa PAT classic con scope repo como admin de la org."),
+            "missing": missing,
+        }
+
+    is_org = org.lower() != login.lower()
+    created = []
+    for name in missing:
+        local = os.path.join(SF_ROOT, name)
+        if not os.path.isdir(local):
+            say(f"⚠ {name}: sin fuente local en el instalador — se omite", "warn")
+            continue
+        say(f"Creando repo {org}/{name}…")
+        path = f"/orgs/{org}/repos" if is_org else "/user/repos"
+        st, body = _github_api("POST", path, token, {
+            "name": name,
+            "private": True,
+            "auto_init": False,
+            "description": f"Kaanbal core — {name} (GitOps source of truth)",
+        })
+        if st not in (200, 201):
+            msg = body.get("message", "") if isinstance(body, dict) else ""
+            if st != 422:
+                return {"ok": False, "error": f"No pude crear {org}/{name} (HTTP {st}): {msg}", "missing": missing}
+            say(f"Repo {org}/{name} ya existía — publicando código…", "info")
+        else:
+            created.append(name)
+            say(f"Repo creado: {org}/{name}", "ok")
+        if create_only:
+            continue
+        err = _push_local_repo(token, org, name, local, log_fn=say)
+        if err:
+            return {"ok": False, "error": err, "missing": missing, "created": created}
+
+    return {"ok": True, "created": created, "existing": existing, "missing": []}
+
+
+def _github_namespaces(token, login, user):
+    """Cuenta personal + organizaciones visibles para el token."""
+    headers = _github_headers(token)
+    namespaces = [{
+        "login": login,
+        "type": "user",
+        "avatar_url": user.get("avatar_url", ""),
+        "label": f"{login} (personal)",
+    }]
+    st_orgs, orgs = http_json("https://api.github.com/user/orgs?per_page=100", headers)
+    if st_orgs == 200 and isinstance(orgs, list):
+        for org in orgs:
+            name = org.get("login", "")
+            if name and name.lower() != login.lower():
+                namespaces.append({
+                    "login": name,
+                    "type": "org",
+                    "avatar_url": org.get("avatar_url", ""),
+                    "label": name,
+                })
+    elif st_orgs in (401, 403):
+        return namespaces, "El token no puede listar organizaciones — agrega scope read:org (classic) o acceso a la org (fine-grained)."
+    return namespaces, None
+
+
+def validate_github(token, org="", repo="infra-gitops"):
+    token = (token or "").strip()
+    if not token:
+        return {"valid": False, "message": "Pega tu Personal Access Token de GitHub."}
+
+    headers = _github_headers(token)
+    status, user = http_json("https://api.github.com/user", headers)
     if status != 200:
-        return {"valid": False, "message": f"GitHub rechazó el token (HTTP {status})."}
+        hint = ""
+        if status == 401:
+            hint = " Token inválido o expirado."
+        elif status == 403:
+            hint = " Token sin permisos suficientes."
+        return {"valid": False, "message": f"GitHub rechazó el token (HTTP {status}).{hint}"}
+
     login = user.get("login", "?")
-    # el email público puede venir vacío si el usuario lo oculta en su perfil;
-    # en ese caso consultamos /user/emails (requiere scope user:email o read:user)
     email = user.get("email")
     if not email:
-        st2, emails = http_json("https://api.github.com/user/emails",
-                                {"Authorization": f"token {token}", "Accept": "application/vnd.github.v3+json"})
+        st2, emails = http_json("https://api.github.com/user/emails", headers)
         if st2 == 200 and isinstance(emails, list):
             primary = next((e["email"] for e in emails if e.get("primary")), None)
             email = primary or (emails[0]["email"] if emails else None)
-    detail = f"'{login}'" + (f" · {email}" if email else " (sin email público — agrega scope 'user:email' si lo necesitas)")
-    return {"valid": True, "message": f"Conectado a GitHub como {detail}.", "login": login, "email": email}
+
+    namespaces, org_warn = _github_namespaces(token, login, user)
+    email_bit = f" · {email}" if email else ""
+    org = (org or "").strip()
+    repo = (repo or "infra-gitops").strip() or "infra-gitops"
+
+    if not org:
+        msg = f"Conectado como '{login}'{email_bit}. Elige la org donde instalar Kaanbal core."
+        if org_warn:
+            msg += f" {org_warn}"
+        return {
+            "valid": False,
+            "needs_org": True,
+            "message": msg,
+            "login": login,
+            "email": email,
+            "namespaces": namespaces,
+        }
+
+    existing, missing = _scan_github_core_repos(token, org)
+    core_repos = [{"name": n, "status": "ok"} for n in existing] + [{"name": n, "status": "missing"} for n in missing]
+    gitops_url = f"https://github.com/{org}/{repo}.git"
+    scope = "organización" if org.lower() != login.lower() else "cuenta personal"
+    base = {
+        "login": login,
+        "email": email,
+        "org": org,
+        "is_org": org.lower() != login.lower(),
+        "gitops_url": gitops_url,
+        "repo": repo,
+        "namespaces": namespaces,
+        "core_repos": core_repos,
+        "existing_repos": existing,
+        "missing_repos": missing,
+    }
+
+    if not missing:
+        st_repo, repo_info = http_json(f"https://api.github.com/repos/{org}/{repo}", headers)
+        branch = repo_info.get("default_branch", "main") if st_repo == 200 else "main"
+        return {
+            **base,
+            "valid": True,
+            "bootstrap_needed": False,
+            "default_branch": branch,
+            "message": (f"GitOps listo en {scope} {org}: {len(existing)} repos core presentes. "
+                        f"Conectado como {login}{email_bit}."),
+        }
+
+    can_bootstrap, role = _github_can_bootstrap(token, org, login)
+    if can_bootstrap:
+        return {
+            **base,
+            "valid": True,
+            "bootstrap_needed": True,
+            "can_create_repos": True,
+            "message": (f"Org {org} OK — faltan {len(missing)} repos core "
+                        f"({', '.join(missing)}). Se crearán al instalar la célula."),
+        }
+
+    return {
+        **base,
+        "valid": False,
+        "needs_org": True,
+        "bootstrap_needed": True,
+        "can_create_repos": False,
+        "message": (f"Faltan repos en {org}: {', '.join(missing)}. "
+                    f"Tu token no puede crearlos (rol: {role}). "
+                    "Usa PAT classic con scope repo como admin de la org, o créalos manualmente."),
+    }
 
 
 # ── Agent Studio: flujos de trabajo y roles (replicables en cualquier app) ──
@@ -651,6 +1132,186 @@ def ai_greet(provider, api_key, model, hostname):
         return {"error": str(e)}
 
 
+TAILSCALE_OPERATOR_TAG = "tag:k8s-operator"
+# Tags que Kaanbal necesita en el tailnet. El operador usa k8s-operator/k8s;
+# database/iot los asignan apps expuestas por VPN (mismo patrón que terraform/tailscale.tf).
+TAILSCALE_PLATFORM_TAGS = {
+    "tag:k8s-operator": ["autogroup:admin"],
+    "tag:k8s": ["tag:k8s-operator"],
+    "tag:database": ["tag:k8s-operator"],
+    "tag:iot": ["tag:k8s-operator"],
+}
+# Sin este grant, los devices tag:k8s aparecen en MagicDNS pero los miembros
+# del tailnet no pueden abrir TCP/HTTP hacia ellos (síntoma: "VPN no aparece / no acceso").
+TAILSCALE_MEMBER_GRANTS = [
+    {
+        "src": ["autogroup:member"],
+        "dst": ["tag:k8s", "tag:k8s-operator", "tag:database", "tag:iot"],
+        "ip": ["*"],
+    },
+]
+
+
+def _tailscale_oauth_token(client_id, client_secret):
+    status, resp = http_json(
+        "https://api.tailscale.com/api/v2/oauth/token",
+        {"Content-Type": "application/x-www-form-urlencoded"},
+        data="grant_type=client_credentials", auth=(client_id, client_secret))
+    if status != 200:
+        return ""
+    return (resp or {}).get("access_token", "") if isinstance(resp, dict) else ""
+
+
+def ensure_tailscale_acl_tags(client_id, client_secret, log_fn=None):
+    """Escribe en la ACL del tailnet los tagOwners que Kaanbal necesita.
+
+    El usuario solo pega el OAuth client (con scope ACL + Auth Keys + Devices).
+    No tiene que editar a mano login.tailscale.com/admin/acls: aquí se hace el
+    merge preservando grants/acls/ssh existentes (misma idea que el terraform
+    antiguo de software-factory).
+
+    Devuelve (ok, detalle).
+    """
+    def say(msg, level="info"):
+        if log_fn:
+            log_fn(msg, level)
+
+    token = _tailscale_oauth_token(client_id, client_secret)
+    if not token:
+        return False, "el cliente OAuth no devolvió token"
+
+    # GET con Accept JSON; el ETag evita pisar cambios concurrentes.
+    req = urllib.request.Request(
+        "https://api.tailscale.com/api/v2/tailnet/-/acl",
+        headers={"Authorization": f"Bearer {token}", "Accept": "application/json"})
+    try:
+        with urllib.request.urlopen(req, timeout=30) as resp:
+            etag = resp.headers.get("ETag", "")
+            acl = json.loads(resp.read().decode() or "{}")
+    except Exception as exc:
+        return False, f"no pude leer la ACL: {exc}"
+
+    owners = dict(acl.get("tagOwners") or acl.get("tagowners") or {})
+    missing = {k: v for k, v in TAILSCALE_PLATFORM_TAGS.items() if k not in owners}
+
+    # Grants: members must reach tagged k8s devices (MagicDNS alone is not enough).
+    grants = list(acl.get("grants") or [])
+    grant_needed = []
+    for wanted in TAILSCALE_MEMBER_GRANTS:
+        if not _grant_covers(grants, wanted):
+            grant_needed.append(wanted)
+
+    # Legacy ACLs fallback if the tailnet still uses acls[] without grants[].
+    acls = list(acl.get("acls") or [])
+    acl_needed = []
+    if not grants and not grant_needed:
+        legacy = {
+            "action": "accept",
+            "src": ["autogroup:member"],
+            "dst": ["tag:k8s:*", "tag:k8s-operator:*", "tag:database:*", "tag:iot:*"],
+        }
+        if not any(
+            (e.get("action") == "accept"
+             and "autogroup:member" in (e.get("src") or [])
+             and any(str(d).startswith("tag:k8s") for d in (e.get("dst") or [])))
+            for e in acls
+        ):
+            acl_needed.append(legacy)
+
+    if not missing and not grant_needed and not acl_needed:
+        say("ACL de Tailscale: tags + acceso de miembros ya presentes", "ok")
+        return True, "already"
+
+    new_acl = dict(acl)
+    if missing:
+        owners.update(missing)
+        new_acl["tagOwners"] = owners
+        new_acl.pop("tagowners", None)
+    if grant_needed:
+        new_acl["grants"] = grants + grant_needed
+    if acl_needed:
+        new_acl["acls"] = acls + acl_needed
+
+    headers = {
+        "Authorization": f"Bearer {token}",
+        "Content-Type": "application/json",
+        "Accept": "application/json",
+    }
+    if etag:
+        headers["If-Match"] = etag
+    body = json.dumps(new_acl).encode()
+    req = urllib.request.Request(
+        "https://api.tailscale.com/api/v2/tailnet/-/acl",
+        data=body, headers=headers, method="POST")
+    try:
+        with urllib.request.urlopen(req, timeout=30) as resp:
+            resp.read()
+    except urllib.error.HTTPError as exc:
+        detail = exc.read().decode()[:240]
+        return False, f"no pude escribir la ACL (HTTP {exc.code}): {detail}"
+    except Exception as exc:
+        return False, f"no pude escribir la ACL: {exc}"
+
+    bits = []
+    if missing:
+        bits.append(f"tags {', '.join(sorted(missing))}")
+    if grant_needed:
+        bits.append(f"{len(grant_needed)} grant(s) member→k8s")
+    if acl_needed:
+        bits.append("acl member→k8s")
+    say(f"ACL de Tailscale actualizada: {'; '.join(bits)}", "ok")
+    return True, "updated"
+
+
+def _grant_covers(existing, wanted):
+    """True if an existing grant already allows wanted src→dst (superset OK)."""
+    w_src = set(wanted.get("src") or [])
+    w_dst = set(wanted.get("dst") or [])
+    for g in existing:
+        g_src = set(g.get("src") or [])
+        g_dst = set(g.get("dst") or [])
+        if w_src <= g_src and w_dst <= g_dst:
+            return True
+    return False
+
+
+def tailscale_can_tag(client_id, client_secret, tag=TAILSCALE_OPERATOR_TAG):
+    """¿Puede este cliente OAuth emitir authkeys con la etiqueta del operador?
+
+    Es lo primero que hace el operador de Tailscale al arrancar. Si la ACL del
+    tailnet no declara la etiqueta, el operador se reinicia para siempre con un
+    400 mientras el resto de la plataforma parece sana. Se comprueba emitiendo
+    una llave efímera de cinco minutos y revocándola en el acto.
+
+    Devuelve (puede?, motivo).
+    """
+    token = _tailscale_oauth_token(client_id, client_secret)
+    if not token:
+        return False, "el cliente OAuth no devolvió token"
+
+    url = "https://api.tailscale.com/api/v2/tailnet/-/keys"
+    payload = json.dumps({
+        "capabilities": {"devices": {"create": {
+            "reusable": False, "ephemeral": True, "preauthorized": True,
+            "tags": [tag]}}},
+        "expirySeconds": 300,
+        # Tailscale rechaza descripciones con signos de puntuación.
+        "description": "kaanbal preflight",
+    })
+    status, resp = http_json(
+        url, {"Authorization": f"Bearer {token}", "Content-Type": "application/json"},
+        data=payload, timeout=25)
+    if status in (200, 201):
+        key_id = resp.get("id", "") if isinstance(resp, dict) else ""
+        if key_id:
+            http_json(f"{url}/{urllib.parse.quote(key_id)}",
+                      {"Authorization": f"Bearer {token}"}, method="DELETE", timeout=15)
+        return True, ""
+
+    message = resp.get("message", "") if isinstance(resp, dict) else str(resp)[:160]
+    return False, message or f"HTTP {status}"
+
+
 def validate_tailscale(client_id, client_secret, dns_suffix=""):
     suffix = (dns_suffix or "").strip().lower()
     if suffix and not suffix.endswith(".ts.net"):
@@ -701,12 +1362,485 @@ def system_info():
     rc, _ = run("k3s kubectl get ns argocd 2>/dev/null", timeout=20)
     info["argocd_present"] = rc == 0
     info["hostname"] = socket.gethostname().lower()
+    # El bootstrap productivo ejecuta un servicio root temporal. El modo manual
+    # conserva compatibilidad con sudo -n, pero nunca exige NOPASSWD:ALL.
+    rc, _ = run("sudo -n true 2>/dev/null", timeout=5) if not PRIVILEGED else (0, "")
+    info["privileged_installer"] = PRIVILEGED
+    info["sudo_nopasswd"] = rc == 0
     with STATE_LOCK:
         STATE["sysinfo"] = info
     return info
 
 
 # --------------------------------------------------------------- instalación ---
+def detect_ingress_class(default="traefik"):
+    """IngressClass que realmente sirve tráfico en este cluster.
+
+    Prefiere la marcada como default; si no hay ninguna, la primera que no sea
+    de Tailscale (esa solo enruta dentro de la VPN). Publicar un Ingress con
+    una clase sin controlador es el fallo silencioso más caro de diagnosticar:
+    kubectl lo acepta y la app nunca responde.
+    """
+    rc, out = kubectl(
+        "get ingressclass -o jsonpath="
+        "'{range .items[*]}{.metadata.name}|"
+        "{.metadata.annotations.ingressclass\\.kubernetes\\.io/is-default-class}{\"\\n\"}{end}'",
+        stream=False)
+    if rc != 0:
+        return default
+
+    candidates = []
+    for line in (out or "").strip().strip("'").splitlines():
+        name, _, is_default = line.partition("|")
+        name = name.strip()
+        if not name:
+            continue
+        if is_default.strip().lower() == "true":
+            return name
+        if name != "tailscale":
+            candidates.append(name)
+    return candidates[0] if candidates else default
+
+
+def apply_yaml(manifest, filename):
+    """Aplica un manifiesto en el cluster. Devuelve el error o None.
+
+    Los manifiestos van a un temporal con permisos 600 porque algunos llevan
+    credenciales; se borra siempre, incluso si kubectl falla.
+    """
+    path = os.path.join("/tmp", f"kaanbal-{filename}")
+    try:
+        with open(path, "w", encoding="utf-8") as fh:
+            fh.write(manifest)
+        os.chmod(path, 0o600)
+        rc, out = kubectl(f"apply -f {path}", timeout=60, stream=False)
+        return None if rc == 0 else (out or "kubectl apply falló")[:300]
+    except Exception as exc:
+        return str(exc)
+    finally:
+        try:
+            os.remove(path)
+        except OSError:
+            pass
+
+
+def ensure_runtime_secrets(cfg):
+    """Crea los secrets que nunca deben vivir en Git.
+
+    MongoDB y la clave de firma de los JWT se generan una sola vez y se
+    conservan entre reinstalaciones: si rotaran en cada `--reset-local`, los
+    datos existentes en el volumen de MongoDB quedarían inaccesibles.
+    """
+    import base64
+
+    db_password = (cfg.get("db_password") or "").strip()
+    api_secret = (cfg.get("api_secret_key") or "").strip()
+
+    # Si ya existen en el cluster, reutilizarlos manda sobre generar nuevos.
+    rc, existing = kubectl(
+        "-n prod get secret kaanbal-api-runtime -o jsonpath='{.data.mongodb-uri}'",
+        stream=False)
+    if rc == 0 and existing.strip().strip("'"):
+        try:
+            current = base64.b64decode(existing.strip().strip("'")).decode()
+            match = re.search(r"://admin:([^@]+)@", current)
+            if match:
+                db_password = urllib.parse.unquote(match.group(1))
+        except Exception:
+            pass
+
+    if not db_password:
+        db_password = secrets.token_urlsafe(24)
+    if not api_secret:
+        api_secret = secrets.token_urlsafe(48)
+
+    safe_password = urllib.parse.quote(db_password, safe="")
+    mongo_uri = (f"mongodb://admin:{safe_password}@datastore:27017/"
+                 "forge?authSource=admin")
+
+    def b64(value):
+        return base64.b64encode(value.encode()).decode()
+
+    err = apply_yaml(
+        "apiVersion: v1\nkind: Secret\nmetadata:\n"
+        "  name: datastore-credentials\n  namespace: prod\n"
+        "type: Opaque\ndata:\n"
+        f"  root-username: {b64('admin')}\n"
+        f"  root-password: {b64(db_password)}\n",
+        "datastore-credentials.yaml")
+    if err:
+        raise RuntimeError(f"No pude crear las credenciales de MongoDB: {err}")
+
+    err = apply_yaml(
+        "apiVersion: v1\nkind: Secret\nmetadata:\n"
+        "  name: kaanbal-api-runtime\n  namespace: prod\n"
+        "type: Opaque\ndata:\n"
+        f"  mongodb-uri: {b64(mongo_uri)}\n"
+        f"  secret-key: {b64(api_secret)}\n",
+        "kaanbal-api-runtime.yaml")
+    if err:
+        raise RuntimeError(f"No pude crear el secret de runtime del API: {err}")
+
+    cfg["db_password"] = db_password
+    cfg["api_secret_key"] = api_secret
+    return db_password, api_secret
+
+
+def wait_until_exists(resource, namespace="prod", timeout=300, poll=5):
+    """Espera a que un objeto aparezca en el cluster."""
+    deadline = time.time() + timeout
+    while time.time() < deadline:
+        rc, _ = kubectl(f"-n {namespace} get {resource}", timeout=30, stream=False)
+        if rc == 0:
+            return True
+        time.sleep(poll)
+    return False
+
+
+def wait_for_rollout(deployment, namespace="prod", timeout=420, log_fn=None,
+                     appear_timeout=300):
+    """Espera a que un Deployment exista y quede disponible. Devuelve (ok, detalle).
+
+    ArgoCD crea los objetos de forma asíncrona después de sincronizar, así que
+    entre aplicar el app-of-apps y ver el Deployment pasan segundos. Preguntar
+    por el rollout antes de tiempo devuelve NotFound al instante, que parece un
+    despliegue roto cuando solo es impaciencia del instalador.
+    """
+    if not wait_until_exists(f"deployment/{deployment}", namespace, appear_timeout):
+        detail = (f"ArgoCD no creó el Deployment en {appear_timeout}s; "
+                  "revisa la Application en ArgoCD")
+        if log_fn:
+            log_fn(f"⚠ {deployment}: {detail}", "warn")
+        return False, detail
+
+    rc, out = kubectl(
+        f"-n {namespace} rollout status deployment/{deployment} --timeout={timeout}s",
+        timeout=timeout + 30, stream=False)
+    if rc == 0:
+        return True, ""
+
+    # El detalle útil está en el estado del pod, no en el timeout de kubectl.
+    _rc, reason = kubectl(
+        f"-n {namespace} get pods -l app={deployment} "
+        "-o jsonpath='{.items[*].status.containerStatuses[*].state.waiting.reason}'",
+        stream=False)
+    reason = (reason or "").strip().strip("'")
+    detail = reason or (out or "").strip()[:200]
+    if log_fn:
+        log_fn(f"⚠ {deployment} no llegó a Ready: {detail}", "warn")
+    return False, detail
+
+
+class PortForward:
+    """Port-forward efímero para hablar con un servicio del cluster."""
+
+    def __init__(self, service, local_port, remote_port, namespace="prod"):
+        self.service = service
+        self.namespace = namespace
+        self.local_port = local_port
+        self.remote_port = remote_port
+        self.cmd = (f"k3s kubectl -n {namespace} port-forward svc/{service} "
+                    f"{local_port}:{remote_port}")
+        self.proc = None
+        self.ready = False
+
+    def __enter__(self):
+        self.proc = subprocess.Popen(
+            self.cmd, shell=True,
+            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        # El túnel tarda un instante en aceptar conexiones.
+        for _ in range(40):
+            time.sleep(0.5)
+            if self.proc.poll() is not None:
+                break
+            try:
+                with socket.create_connection(("127.0.0.1", self.local_port), timeout=1):
+                    self.ready = True
+                    return self
+            except OSError:
+                continue
+        return self
+
+    def __exit__(self, *_exc):
+        if self.proc and self.proc.poll() is None:
+            self.proc.terminate()
+            try:
+                self.proc.wait(timeout=5)
+            except subprocess.TimeoutExpired:
+                self.proc.kill()
+        return False
+
+
+def read_vault_root_token(kubectl_fn):
+    """Lee el root token de Vault desde el secret que crea el bootstrap."""
+    rc, raw = kubectl_fn(
+        "-n vault get secret vault-init-keys "
+        "-o jsonpath='{.data.root-token}'", stream=False)
+    if rc != 0 or not (raw or "").strip():
+        return ""
+    import base64 as _b64
+    return _b64.b64decode(raw.strip().strip("'")).decode()
+
+
+def _vault_json_from_kubectl_output(raw):
+    """Extrae JSON de la salida de kubectl exec (puede incluir exit code al final)."""
+    text = (raw or "").strip()
+    if not text:
+        return None
+    start = text.find("{")
+    end = text.rfind("}")
+    if start < 0 or end <= start:
+        return None
+    try:
+        return json.loads(text[start:end + 1])
+    except json.JSONDecodeError:
+        return None
+
+
+def bootstrap_vault_lab(kubectl_fn, log_fn=None):
+    """Inicializa y desbloquea Vault en k3s sin KMS (lab/dev). Idempotente.
+
+    El manifiesto vault-auto-init asume auto-unseal con KMS; en k3s local Vault
+    usa Shamir y queda sealed/ sin inicializar si nadie corre este paso.
+    """
+    def say(msg, level="info"):
+        if log_fn:
+            log_fn(msg, level)
+
+    rc, status_json = kubectl_fn(
+        "-n vault exec deploy/vault -- vault status -format=json",
+        stream=False)
+    status = _vault_json_from_kubectl_output(status_json)
+    if not status:
+        say("Vault aún no responde — se omitirá el bootstrap por ahora", "warn")
+        return ""
+
+    if status.get("initialized"):
+        token = read_vault_root_token(kubectl_fn)
+        if status.get("sealed") and token:
+            rc_u, keys_b64 = kubectl_fn(
+                "-n vault get secret vault-init-keys "
+                "-o jsonpath='{.data.unseal-key}'", stream=False)
+            if rc_u == 0 and keys_b64.strip():
+                import base64 as _b64
+                unseal_key = _b64.b64decode(keys_b64.strip().strip("'")).decode()
+                kubectl_fn(
+                    f"-n vault exec deploy/vault -- vault operator unseal {unseal_key}",
+                    stream=False)
+                say("Vault desbloqueado con clave guardada", "ok")
+            else:
+                say("Vault inicializado pero sealed — necesita unseal manual o KMS", "warn")
+        elif token:
+            say("Vault ya inicializado y desbloqueado", "ok")
+        return token
+
+    say("Inicializando Vault (1 share, modo lab)…")
+    rc, init_out = kubectl_fn(
+        "-n vault exec deploy/vault -- vault operator init "
+        "-key-shares=1 -key-threshold=1 -format=json",
+        stream=False)
+    if rc != 0:
+        say(f"No pude inicializar Vault: {(init_out or '')[:200]}", "warn")
+        return ""
+
+    try:
+        init_data = _vault_json_from_kubectl_output(init_out) or {}
+    except Exception:
+        init_data = {}
+    if not init_data:
+        say("Salida inválida de vault operator init", "warn")
+        return ""
+
+    root_token = init_data.get("root_token", "")
+    unseal_keys = init_data.get("unseal_keys_b64") or init_data.get("unseal_keys") or []
+    if not root_token or not unseal_keys:
+        say("Vault init no devolvió token o claves de unseal", "warn")
+        return ""
+
+    unseal_key = unseal_keys[0]
+    rc, unseal_out = kubectl_fn(
+        f"-n vault exec deploy/vault -- vault operator unseal {unseal_key}",
+        stream=False)
+    if rc != 0:
+        say(f"Unseal falló: {(unseal_out or '')[:200]}", "warn")
+        return ""
+
+    # Persistir token para que el instalador/API lo lean después
+    import base64 as _b64
+    token_b64 = _b64.b64encode(root_token.encode()).decode()
+    unseal_b64 = _b64.b64encode(unseal_key.encode()).decode()
+    manifest = f"""apiVersion: v1
+kind: Secret
+metadata:
+  name: vault-init-keys
+  namespace: vault
+type: Opaque
+data:
+  root-token: {token_b64}
+  unseal-key: {unseal_b64}
+"""
+    path = "/tmp/vault-init-keys.yaml"
+    with open(path, "w", encoding="utf-8") as f:
+        f.write(manifest)
+    rc, out = kubectl_fn(f"apply -f {path}", stream=False)
+    if rc != 0:
+        say(f"No pude guardar vault-init-keys: {(out or '')[:200]}", "warn")
+
+    # KV v2 para secretos de apps
+    kubectl_fn(
+        f"-n vault exec deploy/vault -- sh -c "
+        f"\"VAULT_TOKEN={root_token} vault secrets enable -path=secret kv-v2\"",
+        stream=False)
+    say("Vault inicializado, desbloqueado y KV v2 habilitado", "ok")
+    return root_token
+
+
+def _resolve_github_login(cfg):
+    """Garantiza github_login aunque el .env desatendido no lo traiga."""
+    login = (cfg.get("github_login") or "").strip()
+    if login:
+        return login
+    token = (cfg.get("gitops_token") or "").strip()
+    org = (cfg.get("github_org") or "").strip()
+    if not token:
+        return ""
+    gh = validate_github(token, org)
+    return (gh.get("login") or "").strip()
+
+
+def seed_platform(cfg, argocd_password, log_fn=None, vault_token=""):
+    """Siembra la configuración de la plataforma en Kaanbal API.
+
+    Deja `system_config` en MongoDB con el dominio, la org de GitHub y las
+    credenciales de Docker Hub/Cloudflare/Tailscale, que es lo que AppDeployer
+    necesita para poder crear apps desde la consola sin volver a pedir nada.
+    """
+    def say(msg, level="info"):
+        if log_fn:
+            log_fn(msg, level)
+
+    github_login = _resolve_github_login(cfg)
+    if github_login:
+        cfg["github_login"] = github_login
+    elif (cfg.get("gitops_token") or "").strip():
+        say("No pude resolver el login de GitHub — el seed puede caer a Bitbucket", "warn")
+
+    domain = (cfg.get("domain") or "").strip().lower()
+    payload = {
+        "mode": cfg.get("mode", "cloud"),
+        "domain": domain,
+        "git_provider": "github",
+        "git_username": github_login,
+        "git_token": (cfg.get("gitops_token") or "").strip(),
+        "git_workspace": (cfg.get("github_org") or "").strip(),
+        "github_is_org": bool(
+            (cfg.get("github_org") or "").lower()
+            and (cfg.get("github_org") or "").lower() != github_login.lower()),
+        "dockerhub_username": (cfg.get("docker_user") or "").strip(),
+        "dockerhub_token": (cfg.get("docker_token") or "").strip(),
+        "tailscale_client_id": (cfg.get("tailscale_id") or "").strip(),
+        "tailscale_client_secret": (cfg.get("tailscale_secret") or "").strip(),
+        "tailscale_dns_suffix": (cfg.get("tailscale_dns") or "").strip(),
+        "cloudflare_token": (cfg.get("cf_token") or "").strip(),
+        "cloudflare_account_id": (cfg.get("cf_account") or "").strip(),
+        "ingress_class": (cfg.get("ingress_class") or "traefik").strip(),
+        "ingress_cluster_issuer": (
+            (cfg.get("cluster_issuer") or "") if cfg.get("cluster_tls") else ""),
+        "argocd_password": argocd_password or "",
+        "argocd_server": "https://argocd-server.argocd.svc.cluster.local:443",
+        "vault_addr": "http://vault.vault.svc.cluster.local:8200",
+        "vault_token": (vault_token or "").strip(),
+        "templates_repo": "kaanbal-templates",
+        "admin_user": (cfg.get("admin_user") or "admin").strip(),
+        "admin_password": (cfg.get("admin_pass") or "").strip(),
+    }
+
+    headers = {"Content-Type": "application/json"}
+    body_install = json.dumps(payload)
+    body_ci = json.dumps({"repos": ["kaanbal-api", "kaanbal-console"]})
+
+    def _post_seed(base_url: str):
+        status, body = http_json(
+            f"{base_url}/api/v1/setup/install", headers, data=body_install, timeout=60)
+        if status not in (200, 201):
+            return False, f"HTTP {status}: {str(body)[:200]}"
+        say("Configuración de plataforma sembrada en Kaanbal API", "ok")
+
+        # Auth as the just-seeded admin so we can refresh the template catalog.
+        admin_user = payload["admin_user"]
+        admin_pass = payload["admin_password"]
+        token = ""
+        if admin_user and admin_pass:
+            try:
+                form = urllib.parse.urlencode(
+                    {"username": admin_user, "password": admin_pass}).encode()
+                req = urllib.request.Request(
+                    f"{base_url}/api/v1/auth/token",
+                    data=form,
+                    headers={"Content-Type": "application/x-www-form-urlencoded"},
+                    method="POST",
+                )
+                with urllib.request.urlopen(req, timeout=30) as resp:
+                    token = json.loads(resp.read().decode()).get("access_token", "")
+            except Exception as exc:
+                say(f"⚠ Auth post-seed falló: {str(exc)[:120]}", "warn")
+
+        if token:
+            auth_headers = {**headers, "Authorization": f"Bearer {token}"}
+            st_t, body_t = http_json(
+                f"{base_url}/api/v1/templates/refresh", auth_headers, timeout=90)
+            if st_t in (200, 201):
+                count = body_t.get("template_count") if isinstance(body_t, dict) else "?"
+                say(f"Catálogo de templates refrescado ({count})", "ok")
+            else:
+                say(f"⚠ Refresh de templates HTTP {st_t}", "warn")
+
+        status, body = http_json(
+            f"{base_url}/api/v1/setup/bootstrap-core-ci",
+            {**headers, **({"Authorization": f"Bearer {token}"} if token else {})},
+            data=body_ci, timeout=90)
+        if status in (200, 201):
+            wired = ", ".join(body.get("configured", [])) if isinstance(body, dict) else ""
+            say(f"Pipelines de GitHub Actions conectados: {wired or 'sin cambios'}", "ok")
+        elif status == 404:
+            say("La versión desplegada del API todavía no expone el bootstrap de CI — "
+                "los pipelines quedan sin secrets hasta la próxima actualización", "warn")
+        else:
+            say(f"⚠ No pude inyectar los secrets de CI (HTTP {status})", "warn")
+        return True, ""
+
+    # 1) Prefer in-cluster port-forward (works even before public DNS is live).
+    with PortForward("kaanbal-api", 18000, 8000) as pf:
+        if pf.ready:
+            ok, detail = _post_seed("http://127.0.0.1:18000")
+            if ok:
+                return True, ""
+            say(f"Seed vía port-forward falló: {detail}", "warn")
+        else:
+            say("Port-forward a kaanbal-api no listo — pruebo URL pública", "warn")
+
+    # 2) Fallback: public API (Cloudflare / Traefik already routing).
+    if domain:
+        ok, detail = _post_seed(f"https://kaanbal-api.{domain}")
+        if ok:
+            return True, ""
+        return False, detail
+    return False, "Port-forward falló y no hay dominio para fallback público"
+
+
+def probe_public_url(url, timeout=15):
+    """(alcanzable?, código o motivo). Un 3xx/4xx ya prueba que hay ruta."""
+    req = urllib.request.Request(url, method="GET",
+                                 headers={"User-Agent": "kaanbal-installer"})
+    try:
+        with urllib.request.urlopen(req, timeout=timeout) as resp:
+            return True, resp.status
+    except urllib.error.HTTPError as exc:
+        return True, exc.code
+    except Exception as exc:
+        return False, str(exc)[:120]
+
+
 def do_install(cfg):
     global INSTALLING, PORT_FORWARD_PROC
     try:
@@ -721,6 +1855,10 @@ def do_install(cfg):
             raise RuntimeError("systemd no está activo. En WSL2: agrega [boot] systemd=true a /etc/wsl.conf y ejecuta wsl --shutdown")
         if (info["ram_gb"] or 0) < 3.5:
             raise RuntimeError(f"RAM insuficiente: {info['ram_gb']}GB (mínimo 4GB)")
+        if not info.get("sudo_nopasswd") and not info.get("k3s_installed"):
+            raise RuntimeError(
+                "El instalador no tiene privilegios. Inícialo con: sudo bash ./install.sh"
+            )
         set_step("sistema", "done", f"{info['ram_gb']}GB RAM · {info['cpus']} CPUs · {info['disk_free_gb']}GB libres · systemd ✓")
 
         # 2. k3s
@@ -730,10 +1868,15 @@ def do_install(cfg):
             log("k3s ya presente, se omite descarga", "ok")
         else:
             log("Descargando e instalando k3s (~60s)...")
+            privilege = "" if PRIVILEGED else "sudo "
             rc, out = run(
-                f"curl -sfL https://get.k3s.io | sudo INSTALL_K3S_EXEC='--write-kubeconfig-mode 644 --node-name {info['hostname']}' sh -",
+                f"curl -sfL https://get.k3s.io | {privilege}INSTALL_K3S_EXEC='--write-kubeconfig-mode 644 --node-name {info['hostname']}' sh -",
                 timeout=420, stream=True)
             if rc != 0:
+                if "terminal is required" in (out or "") or "a password is required" in (out or "").lower():
+                    raise RuntimeError(
+                        "k3s falló: sudo sin password. Configura NOPASSWD (ver mensaje del paso Sistema) y reintenta."
+                    )
                 raise RuntimeError("La instalación de k3s falló — revisa el log")
             set_step("k3s", "done", "k3s instalado")
 
@@ -802,10 +1945,31 @@ def do_install(cfg):
 
         # 5b. Credenciales base de la plataforma (Docker registry + Tailscale VPN)
         kubectl("get ns prod || k3s kubectl create namespace prod", timeout=30)
+        admin_user = (cfg.get("admin_user") or "admin").strip()
+        admin_pass = (cfg.get("admin_pass") or "").strip()
+        if not admin_pass:
+            raise RuntimeError("Falta la contraseña del administrador de Kaanbal")
+        import base64 as _b64
+        admin_secret = (
+            "apiVersion: v1\nkind: Secret\nmetadata:\n"
+            "  name: kaanbal-bootstrap-creds\n  namespace: prod\n"
+            "type: Opaque\ndata:\n"
+            f"  username: {_b64.b64encode(admin_user.encode()).decode()}\n"
+            f"  password: {_b64.b64encode(admin_pass.encode()).decode()}\n"
+        )
+        tmp_admin = "/tmp/kaanbal-bootstrap-creds.yaml"
+        with open(tmp_admin, "w", encoding="utf-8") as f:
+            f.write(admin_secret)
+        os.chmod(tmp_admin, 0o600)
+        rc, _ = kubectl(f"apply -f {tmp_admin}", timeout=30)
+        os.remove(tmp_admin)
+        if rc != 0:
+            raise RuntimeError("No se pudo crear el acceso administrativo de Kaanbal")
+        log(f"Acceso administrativo preparado para '{admin_user}'", "ok")
+
         dk_user = (cfg.get("docker_user") or "").strip()
         dk_token = (cfg.get("docker_token") or "").strip()
         if dk_user and dk_token:
-            import base64 as _b64
             auth = _b64.b64encode(f"{dk_user}:{dk_token}".encode()).decode()
             dockercfg = _b64.b64encode(json.dumps({"auths": {"https://index.docker.io/v1/":
                 {"username": dk_user, "password": dk_token, "auth": auth}}}).encode()).decode()
@@ -821,14 +1985,31 @@ def do_install(cfg):
 
         ts_id = (cfg.get("tailscale_id") or "").strip()
         ts_secret = (cfg.get("tailscale_secret") or "").strip()
+        cfg["tailscale_ready"] = False
         if ts_id and ts_secret:
-            kubectl("get ns tailscale || k3s kubectl create namespace tailscale", timeout=30)
-            rc, _ = run(
-                "k3s kubectl -n tailscale create secret generic operator-oauth "
-                f"--from-literal=client_id='{ts_id}' --from-literal=client_secret='{ts_secret}' "
-                "--dry-run=client -o yaml | k3s kubectl apply -f -", timeout=30)
-            if rc == 0:
-                log("Tailscale conectado: secret 'operator-oauth' listo — el tier privado/VPN queda disponible", "ok")
+            # Primero: escribir tagOwners en la ACL vía API (como hacía
+            # terraform/tailscale.tf). El usuario no edita ACL a mano.
+            acl_ok, acl_why = ensure_tailscale_acl_tags(ts_id, ts_secret, log_fn=log)
+            if not acl_ok:
+                log(f"⚠ No pude preparar la ACL de Tailscale ({acl_why}). "
+                    "El OAuth necesita scope de Policy/ACL. Revisa el cliente en "
+                    "login.tailscale.com/admin/settings/oauth.", "warn")
+            # Luego: confirmar que el OAuth puede emitir authkeys con el tag.
+            can_tag, why = tailscale_can_tag(ts_id, ts_secret)
+            if not can_tag:
+                log(f"⚠ Tailscale queda fuera: no puedo emitir {TAILSCALE_OPERATOR_TAG} "
+                    f"({why}). Concede al OAuth Auth Keys + tag {TAILSCALE_OPERATOR_TAG} "
+                    "en login.tailscale.com/admin/settings/oauth y reinstala.", "warn")
+            else:
+                kubectl("get ns tailscale || k3s kubectl create namespace tailscale", timeout=30)
+                rc, _ = run(
+                    "k3s kubectl -n tailscale create secret generic operator-oauth "
+                    f"--from-literal=client_id='{ts_id}' --from-literal=client_secret='{ts_secret}' "
+                    "--dry-run=client -o yaml | k3s kubectl apply -f -", timeout=30)
+                if rc == 0:
+                    cfg["tailscale_ready"] = True
+                    log("Tailscale conectado: ACL + secret 'operator-oauth' listos — "
+                        "el tier privado/VPN queda disponible", "ok")
 
         # 6. Cloudflare Tunnel (tier público) — AQUÍ el dominio cobra vida
         set_step("cloudflared", "running")
@@ -867,82 +2048,224 @@ def do_install(cfg):
                     timeout=30)
                 if rc != 0:
                     raise RuntimeError("No se pudo crear el secret del túnel")
-                tmp_cf = "/tmp/kaanbal-cloudflared.yaml"
-                with open(tmp_cf, "w") as f:
-                    f.write(CLOUDFLARED_DEPLOYMENT)
-                kubectl(f"apply -f {tmp_cf}", timeout=40)
-                os.remove(tmp_cf)
-                kubectl("-n prod rollout status deployment/cloudflared --timeout=120s", timeout=130, stream=False)
+                err = apply_yaml(CLOUDFLARED_DEPLOYMENT, "cloudflared.yaml")
+                if err:
+                    raise RuntimeError(f"No pude desplegar el conector del túnel: {err}")
+                # Sin este conector corriendo, Cloudflare acepta el dominio pero
+                # no encuentra origen y responde 530 a todo. Dar el paso por
+                # bueno sin comprobarlo convierte eso en un misterio.
+                rc, out = kubectl(
+                    "-n prod rollout status deployment/cloudflared --timeout=180s",
+                    timeout=200, stream=False)
+                if rc != 0:
+                    raise RuntimeError(
+                        "El conector del túnel no llegó a Ready: "
+                        f"{(out or '').strip()[:200]}")
                 set_step("cloudflared", "done", f"Túnel activo — {domain} servido desde esta máquina 🌐")
                 log(f"🌐 Tier público EN VIVO: https://{domain} y *.{domain} salen por Cloudflare (sin IP pública)", "ok")
             elif not cf_token:
                 set_step("cloudflared", "skipped", "Sin credenciales Cloudflare — pega tu token en Conectividad")
                 log("Túnel omitido: faltó token de Cloudflare para crearlo.", "warn")
 
-        # 6. Bootstrap GitOps (OPCIONAL — su fallo nunca aborta la instalación)
-        set_step("gitops", "running")
-        repo_url = (cfg.get("gitops_url") or "").strip()
+        # 6. Repos core en GitHub + baseline GitOps renderizado con TU dominio
+        set_step("repos", "running")
         repo_token = (cfg.get("gitops_token") or "").strip()
-        if not repo_url:
-            set_step("gitops", "skipped", "Sin repo — conéctalo después desde la consola")
-            log("Bootstrap GitOps omitido (sin repo configurado)")
-        else:
-            # normalizar/validar la URL: debe ser un REPO, no una página de org/usuario
-            norm = repo_url
-            if norm.endswith("/"):
-                norm = norm[:-1]
-            bad = None
-            m = re.match(r"https?://github\.com/(orgs|users)/([^/]+)/?$", norm)
-            if m:
-                bad = (f"'{norm}' es la página de {'organización' if m.group(1)=='orgs' else 'usuario'} "
-                       f"'{m.group(2)}', no un repositorio. Usa la URL del repo: "
-                       f"https://github.com/{m.group(2)}/infra-gitops.git")
-            elif re.match(r"https?://github\.com/[^/]+/?$", norm):
-                bad = f"'{norm}' parece un perfil, no un repo. Falta el nombre del repositorio (…/infra-gitops.git)."
-            if bad:
-                set_step("gitops", "failed", "URL de repo inválida — la célula quedó lista igual")
-                log("⚠ GitOps: " + bad, "warn")
-                log("Puedes conectar el repo después desde la consola; sigo con el despliegue.", "info")
-            else:
-                if not norm.endswith(".git"):
-                    norm += ".git"
-                try:
-                    if repo_token:
-                        secret_yaml = f"""apiVersion: v1
-kind: Secret
-metadata:
-  name: kaanbal-infra-gitops-repo
-  namespace: argocd
-  labels:
-    argocd.argoproj.io/secret-type: repository
-stringData:
-  type: git
-  url: {norm}
-  username: kaanbal
-  password: {repo_token}
-"""
-                        tmp = "/tmp/kaanbal-repo-secret.yaml"
-                        with open(tmp, "w") as f:
-                            f.write(secret_yaml)
-                        kubectl(f"apply -f {tmp}", timeout=30)
-                        os.remove(tmp)
-                    clone_url = norm if not repo_token else norm.replace("https://", f"https://kaanbal:{repo_token}@")
-                    rc, out = run(f"rm -rf /tmp/kaanbal-gitops && git clone --depth 1 '{clone_url}' /tmp/kaanbal-gitops", timeout=120)
-                    if rc == 0 and os.path.exists("/tmp/kaanbal-gitops/argocd/bootstrap/app-of-apps.yaml"):
-                        kubectl("apply -f /tmp/kaanbal-gitops/argocd/bootstrap/app-of-apps.yaml", timeout=30)
-                        set_step("gitops", "done", "app-of-apps aplicado — la célula reconcilia tu repo")
-                        log("GitOps conectado: ArgoCD desplegará la plataforma completa", "ok")
-                    elif rc == 0:
-                        set_step("gitops", "done", "Repo clonado; sin app-of-apps — aplica tus Applications luego")
-                    else:
-                        set_step("gitops", "failed", "No se pudo clonar — la célula quedó lista igual")
-                        log(f"⚠ GitOps: no se pudo clonar '{norm}'. ¿Existe el repo y el token tiene acceso?", "warn")
-                        log("Sigo con el despliegue; conecta el repo después desde la consola.", "info")
-                except Exception as ge:
-                    set_step("gitops", "failed", "Error en GitOps — la célula quedó lista igual")
-                    log(f"⚠ GitOps falló: {ge}. Continúo con el despliegue.", "warn")
+        github_org = (cfg.get("github_org") or "").strip()
+        github_login = (cfg.get("github_login") or "").strip()
+        gitops_repo = (cfg.get("gitops_repo") or "infra-gitops").strip()
+        gitops_ready = False
+        build_core = True
+        core_tags = {}
 
-        # 7. Acceso operativo
+        if not (github_org and repo_token):
+            set_step("repos", "skipped", "Sin GitHub — conéctalo después desde la consola")
+            log("Sin org o token de GitHub: la célula queda operativa pero sin GitOps.", "warn")
+        else:
+            repo_url = f"https://github.com/{github_org}/{gitops_repo}.git"
+
+            # 6a. Los repos deben existir antes de poder publicar o construir.
+            bs = bootstrap_github_core(repo_token, github_org, github_login,
+                                       log_fn=log, create_only=True)
+            if not bs.get("ok"):
+                raise RuntimeError(
+                    f"No pude preparar los repos en {github_org}: {bs.get('error', 'error desconocido')}")
+
+            # 6b. El código del engine: solo se siembra si el repo está vacío.
+            for component in corebuild.CORE_COMPONENTS:
+                sha, err = gitops_publish.publish_source(
+                    run, repo_token, github_org, component["repo"],
+                    os.path.join(SF_ROOT, component["repo"]), log_fn=log)
+                if err:
+                    raise RuntimeError(err)
+                # Mismo tag que produciría GitHub Actions para ese commit, para
+                # que el pipeline y el instalador nunca se contradigan.
+                core_tags[component["name"]] = f"prod-{sha[:7]}"
+
+            # Catálogo de plantillas: la consola lista un fallback local, pero
+            # AppDeployer necesita clonar este repo para scaffold + k8s.
+            tpl_path = os.path.join(SF_ROOT, "kaanbal-templates")
+            if not os.path.isdir(tpl_path):
+                raise RuntimeError(
+                    "Falta kaanbal-templates en el instalador — sin él no se "
+                    "pueden lanzar apps desde la consola.")
+            _, tpl_err = gitops_publish.publish_source(
+                run, repo_token, github_org, "kaanbal-templates", tpl_path,
+                log_fn=log)
+            if tpl_err:
+                raise RuntimeError(tpl_err)
+
+            # 6b-bis. Una versión fijada gana sobre el código local: se despliega
+            # tal cual, sin construir nada. Es la ruta de producción.
+            core_version = (cfg.get("core_version") or "").strip()
+            if core_version:
+                pinned, missing = corebuild.resolve_pinned(
+                    cfg.get("docker_user", ""), cfg.get("docker_token", ""),
+                    core_version)
+                if missing:
+                    raise RuntimeError(
+                        f"Pediste la versión {core_version} del engine pero no está "
+                        f"publicada: falta {', '.join(missing)}. Publícala o deja "
+                        "KAANBAL_CORE_VERSION vacío para construirla desde el código.")
+                core_tags = pinned
+                build_core = False
+                log(f"Engine fijado a la versión {core_version}: no se construye nada", "ok")
+            else:
+                build_core = True
+
+            # 6b-ter. Las imágenes ANTES del baseline. ArgoCD sincroniza en
+            # cuanto el repo cambia, así que publicar manifiestos que apuntan a
+            # una imagen todavía inexistente deja los pods en ImagePullBackOff
+            # hasta que el build termina; el despliegue acaba saliendo, pero la
+            # verificación final falla por una carrera que no aporta nada.
+            if build_core:
+                set_step("imagenes", "running")
+                log("Construyendo el engine dentro del cluster (Kaniko, sin Docker en el nodo)…")
+                corebuild.build_core_images(
+                    kubectl, apply_yaml,
+                    github_org=github_org, github_token=repo_token,
+                    docker_user=cfg.get("docker_user", ""),
+                    docker_token=cfg.get("docker_token", ""),
+                    tags=core_tags, log_fn=log)
+                built = ", ".join(c["name"] for c in corebuild.CORE_COMPONENTS)
+                set_step("imagenes", "done", f"Publicados en Docker Hub: {built}")
+            else:
+                set_step("imagenes", "skipped",
+                         f"Versión {core_version} ya publicada en Docker Hub")
+
+            # 6c. El baseline: se renderiza con la config real y se refresca
+            #     sin tocar los overlays de las apps creadas desde la consola.
+            cfg["api_tag"] = core_tags.get("kaanbal-api", "bootstrap")
+            cfg["console_tag"] = core_tags.get("kaanbal-console", "bootstrap")
+            cfg["agent_tag"] = core_tags.get("kaanbal-agent", "bootstrap")
+            cfg["gitops_repo"] = gitops_repo
+            cfg["ingress_class"] = detect_ingress_class()
+            log(f"Controlador de ingress detectado: {cfg['ingress_class']}")
+            context, flags = gitops_render.build_context(cfg)
+            infra_src = os.path.join(SF_ROOT, "infra-gitops")
+            # Qué se renderiza depende de las flags (sin Tailscale, su operador
+            # no entra). Qué rutas *posee* el instalador en el repo publicado no:
+            # deben seguir siendo suyas para poder borrar un componente que se
+            # retiró, en vez de dejarlo huérfano sincronizándose para siempre.
+            render_rules = gitops_render.load_baseline(infra_src, flags)
+            owned_rules = gitops_render.load_baseline(infra_src)
+
+            rendered = "/tmp/kaanbal-baseline-rendered"
+            written = gitops_render.render_tree(
+                infra_src, rendered, context, flags, render_rules)
+            log(f"Baseline renderizado para {context['KAANBAL_DOMAIN']} "
+                f"({len(written)} manifiestos)")
+
+            failures = gitops_render.validate_rendered(rendered)
+            if failures:
+                detail = "; ".join(f"{t}: {e}" for t, e in failures[:3])
+                raise RuntimeError(f"El baseline renderizado no compila: {detail}")
+            log("Manifiestos validados con kustomize antes de publicar", "ok")
+
+            _sha, err = gitops_publish.publish_baseline(
+                run, repo_token, github_org, gitops_repo, rendered, owned_rules,
+                log_fn=log)
+            if err:
+                raise RuntimeError(err)
+
+            err = apply_yaml(
+                "apiVersion: v1\nkind: Secret\nmetadata:\n"
+                "  name: kaanbal-infra-gitops-repo\n  namespace: argocd\n"
+                "  labels:\n    argocd.argoproj.io/secret-type: repository\n"
+                "stringData:\n  type: git\n"
+                f"  url: {repo_url}\n  username: kaanbal\n  password: {repo_token}\n",
+                "repo-secret.yaml")
+            if err:
+                raise RuntimeError(f"ArgoCD no pudo registrar el repo: {err}")
+
+            gitops_ready = True
+            set_step("repos", "done",
+                     f"{github_org}/{gitops_repo} al día · engine en {context['KAANBAL_DOMAIN']}")
+
+        # Las imágenes se construyen dentro del paso de repos, antes de publicar
+        # el baseline, para que ArgoCD nunca vea una referencia sin imagen.
+        if not gitops_ready:
+            set_step("imagenes", "skipped", "Requiere GitHub configurado")
+
+        # 7. GitOps: ArgoCD toma el control del baseline
+        if not gitops_ready:
+            set_step("gitops", "skipped", "Requiere GitHub configurado")
+        else:
+            set_step("gitops", "running")
+            ensure_runtime_secrets(cfg)
+            log("Secrets de runtime creados fuera de Git (MongoDB y firma JWT)", "ok")
+
+            rc, out = run(
+                f"rm -rf /tmp/kaanbal-gitops && git clone --depth 1 "
+                f"'{gitops_publish.auth_url(repo_token, github_org, gitops_repo)}' "
+                "/tmp/kaanbal-gitops", timeout=180)
+            if rc != 0:
+                raise RuntimeError(f"No pude clonar el baseline publicado: {(out or '')[:200]}")
+
+            boot = "/tmp/kaanbal-gitops/argocd/bootstrap/app-of-apps.yaml"
+            rc, out = kubectl(f"apply -f {boot}", timeout=60, stream=False)
+            if rc != 0:
+                raise RuntimeError(f"No pude aplicar app-of-apps: {(out or '')[:200]}")
+            log("app-of-apps aplicado — ArgoCD reconcilia la plataforma", "ok")
+
+            for deployment in ("datastore", "kaanbal-api", "kaanbal-console"):
+                ok, detail = wait_for_rollout(deployment, log_fn=log)
+                if ok:
+                    log(f"{deployment} Ready", "ok")
+                elif deployment == "datastore":
+                    log("MongoDB tarda más de lo normal; el API reintentará conectarse.", "warn")
+                else:
+                    raise RuntimeError(f"{deployment} no llegó a Ready ({detail})")
+            set_step("gitops", "done", "Engine desplegado y sincronizado por ArgoCD")
+
+        # 9. Plataforma: sembrar configuración y conectar los pipelines
+        if not gitops_ready:
+            set_step("plataforma", "skipped", "Requiere GitHub configurado")
+        else:
+            set_step("plataforma", "running")
+            rc, argo_pwd = kubectl(
+                "-n argocd get secret argocd-initial-admin-secret "
+                "-o jsonpath='{.data.password}'", stream=False)
+            argo_plain = ""
+            if rc == 0 and argo_pwd.strip():
+                import base64 as _b64pw
+                argo_plain = _b64pw.b64decode(argo_pwd.strip().strip("'")).decode()
+
+            vault_token = bootstrap_vault_lab(kubectl, log_fn=log)
+            if not vault_token:
+                vault_token = read_vault_root_token(kubectl)
+
+            ok, detail = seed_platform(cfg, argo_plain, log_fn=log,
+                                       vault_token=vault_token)
+            if ok:
+                set_step("plataforma", "done",
+                         "Kaanbal ya sabe tu dominio, tu org y tu Docker Hub")
+            else:
+                # La célula funciona; el operador puede completar esto en la
+                # consola, así que no tiramos toda la instalación por aquí.
+                set_step("plataforma", "failed", "Configura las credenciales desde la consola")
+                log(f"⚠ No pude sembrar la configuración: {detail}", "warn")
+
+        # 10. Acceso operativo
         set_step("acceso", "running")
         rc, pwd = kubectl("-n argocd get secret argocd-initial-admin-secret -o jsonpath='{.data.password}'")
         password = ""
@@ -955,29 +2278,71 @@ stringData:
                 shell=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
             time.sleep(2)
         rc, node = kubectl("get node --no-headers")
+        dom = STATE.get("domain", "")
+        live = bool(dom) and STATE.get("steps", {}).get("cloudflared", {}).get("status") == "done"
+        console_tailnet = str(cfg.get("console_exposure", "public")).lower() == "tailnet"
+
+        # Mapa de URLs del engine: cada servicio del core en su propio nombre
+        # bajo el prefijo "kaanbal-", más el atajo "kaanbal" hacia la consola.
+        console_url = ""
+        api_url = ""
+        agent_url = ""
+        if live and gitops_ready and not console_tailnet:
+            console_url = f"https://{CORE_HOSTS['console']}.{dom}"
+            api_url = f"https://{CORE_HOSTS['api']}.{dom}"
+            agent_url = f"https://{CORE_HOSTS['agent']}.{dom}"
+        elif console_tailnet:
+            tailnet = (cfg.get("tailscale_dns") or "").strip()
+            console_url = f"http://{CORE_HOSTS['console']}.{tailnet}" if tailnet else ""
+            agent_url = f"http://{CORE_HOSTS['agent']}.{tailnet}" if tailnet else ""
+
+        argocd_url = (f"https://{CORE_HOSTS['argocd']}.{dom}" if live
+                      else "https://localhost:8080")
+
+        # No invitamos a entrar hasta comprobar que la consola responde de
+        # verdad por su URL pública: un enlace muerto es peor que ningún enlace.
+        console_reachable = False
+        if console_url.startswith("https://"):
+            log(f"Comprobando que la consola responde en {console_url}…")
+            for attempt in range(12):
+                console_reachable, detail = probe_public_url(console_url)
+                if console_reachable:
+                    log(f"Consola respondiendo (HTTP {detail})", "ok")
+                    break
+                if attempt == 0:
+                    log("Aún no responde — el DNS de Cloudflare tarda 1-2 min la primera vez.")
+                time.sleep(10)
+            if not console_reachable:
+                log("⚠ La consola no respondió todavía. El despliegue está bien; "
+                    "reintenta la URL en un par de minutos.", "warn")
+
         with STATE_LOCK:
-            dom = STATE.get("domain", "")
-            live = bool(dom) and STATE.get("steps", {}).get("cloudflared", {}).get("status") == "done"
-            # si el túnel quedó en vivo, el acceso primario es por dominio + HTTPS de Cloudflare
-            argocd_url = f"https://argocd.{dom}" if live else "https://localhost:8080"
-            if not live and dom:
-                # dominio configurado pero túnel no activó: seguimos dando acceso local + aviso
-                argocd_url = "https://localhost:8080"
             STATE["handoff"] = {
                 "domain": dom,
                 "tunnel_live": live,
-                "console_url": f"https://{dom}" if live else "",
+                "console_url": console_url,
+                "console_reachable": console_reachable,
+                "console_exposure": "tailnet" if console_tailnet else "public",
+                "api_url": api_url,
+                "agent_url": agent_url,
                 "argocd_url": argocd_url,
                 "argocd_user": "admin",
                 "argocd_password": password or "(rotado — usa argocd admin initial-password)",
                 "kubeconfig": "/etc/rancher/k3s/k3s.yaml",
                 "node": node.split()[0] if node else "",
                 "dns": STATE.get("tunnel_dns", []),
+                "admin_user": admin_user,
+                "engine_ready": gitops_ready,
             }
-        if live:
-            set_step("acceso", "done", f"En vivo: https://{dom} · ArgoCD en https://argocd.{dom}")
-            log(f"🎉 Célula EN LA NUBE: tu dominio {dom} ya sirve desde esta máquina (HTTPS por Cloudflare)", "ok")
-            log("El DNS puede tardar 1-2 min en propagar la primera vez.", "info")
+
+        if console_url and gitops_ready:
+            set_step("acceso", "done", f"Consola Kaanbal en {console_url}")
+            log(f"🎉 Kaanbal operativo. Entra a {console_url} con el usuario "
+                f"'{admin_user}' y empieza a desplegar apps.", "ok")
+        elif live:
+            set_step("acceso", "done", f"Túnel activo en {dom}, engine sin publicar")
+            log("Túnel y cluster operativos, pero el engine no quedó publicado. "
+                "Revisa los pasos Repos e Imágenes.", "warn")
         else:
             set_step("acceso", "done", "ArgoCD en https://localhost:8080 (túnel no activo — revisa Cloudflare)")
             log("Célula Kaanbal operativa 🎉 (acceso local; para dominio revisa el paso Túnel)", "ok")
@@ -986,12 +2351,15 @@ stringData:
 
     except Exception as e:
         log(f"ERROR: {e}", "error")
+        failed_step = None
         with STATE_LOCK:
             for sid, s in STATE["steps"].items():
                 if s["status"] == "running":
                     STATE["steps"][sid] = {"status": "error", "detail": str(e)}
-                    emit("step", step=sid, status="error", detail=str(e))
+                    failed_step = sid
                     break
+        if failed_step:
+            emit("step", step=failed_step, status="error", detail=str(e))
         set_phase("error")
     finally:
         INSTALLING = False
@@ -1013,12 +2381,13 @@ class Handler(BaseHTTPRequestHandler):
         from urllib.parse import urlparse, parse_qs
         q = parse_qs(urlparse(self.path).query)
         token = q.get("token", [None])[0] or self.headers.get("X-Kaanbal-Token")
-        return token == TOKEN
+        return not TOKEN_REVOKED and secrets.compare_digest(token or "", TOKEN)
 
     def _json(self, code, obj):
         body = json.dumps(obj).encode()
         self.send_response(code)
         self.send_header("Content-Type", "application/json")
+        self.send_header("Cache-Control", "no-store")
         self.send_header("Content-Length", str(len(body)))
         self.end_headers()
         self.wfile.write(body)
@@ -1078,6 +2447,9 @@ class Handler(BaseHTTPRequestHandler):
             snapshot["hostname"] = socket.gethostname().lower()
             return self._json(200, snapshot)
 
+        if parsed.path == "/api/credentials/status":
+            return self._json(200, credentials_status())
+
         if parsed.path == "/api/observe":
             return self._json(200, observe())
 
@@ -1123,7 +2495,7 @@ class Handler(BaseHTTPRequestHandler):
         self.send_error(404)
 
     def do_POST(self):
-        global INSTALLING
+        global INSTALLING, TOKEN_REVOKED
         from urllib.parse import urlparse
         parsed = urlparse(self.path)
         if not self._auth_ok():
@@ -1136,7 +2508,11 @@ class Handler(BaseHTTPRequestHandler):
             if kind == "cloudflare":
                 return self._json(200, validate_cloudflare(body.get("token", ""), body.get("account_id", "")))
             if kind == "github":
-                return self._json(200, validate_github(body.get("token", "")))
+                return self._json(200, validate_github(
+                    body.get("token", ""),
+                    org=body.get("org", ""),
+                    repo=body.get("repo", "infra-gitops"),
+                ))
             if kind == "tailscale":
                 return self._json(200, validate_tailscale(body.get("client_id", ""), body.get("client_secret", ""),
                                                           body.get("dns_suffix", "")))
@@ -1160,6 +2536,32 @@ class Handler(BaseHTTPRequestHandler):
             event = remember(body.get("source", "console"), body.get("kind", "accion"),
                              **{k: v for k, v in body.items() if k not in ("source", "kind")})
             return self._json(201, event)
+
+        if parsed.path == "/api/env/import":
+            env_text = body.get("env", "")
+            if not isinstance(env_text, str) or len(env_text.encode()) > 65536:
+                return self._json(400, {"error": "El .env debe ser texto y pesar menos de 64KB"})
+            parsed_env = parse_env_text(env_text)
+            if not parsed_env:
+                return self._json(400, {"error": "No encontré variables Kaanbal reconocidas"})
+            save_credentials(parsed_env)
+            remember("installer", "credentials-imported", keys=sorted(parsed_env))
+            return self._json(200, {"message": "Credenciales guardadas", **credentials_status()})
+
+        if parsed.path == "/api/finalize":
+            if STATE.get("phase") != "done":
+                return self._json(409, {"error": "La instalación todavía no terminó"})
+            creds = load_credentials()
+            username = str(body.get("username", "")).strip()
+            password = str(body.get("password", ""))
+            if not (secrets.compare_digest(username, creds.get("admin_user", "")) and
+                    secrets.compare_digest(password, creds.get("admin_pass", ""))):
+                return self._json(401, {"error": "Usuario o contraseña no coinciden con el acceso configurado"})
+            self._json(200, {"message": "Acceso confirmado. Token temporal revocado."})
+            TOKEN_REVOKED = True
+            remember("installer", "token-revoked", username=username)
+            threading.Thread(target=_shutdown_privileged_installer, daemon=True).start()
+            return
 
         if parsed.path == "/api/catalog/clip":
             # Registrar un clip nuevo en la tabla master (animacion/catalog.json)
@@ -1195,11 +2597,56 @@ class Handler(BaseHTTPRequestHandler):
         if parsed.path == "/api/install":
             if INSTALLING:
                 return self._json(409, {"error": "Instalación ya en curso"})
+            restored = load_credentials()
+            merged = {**restored, **{k: v for k, v in body.items() if v not in (None, "")}}
+            if not merged.get("admin_user"):
+                merged["admin_user"] = "admin"
+            if len(str(merged.get("admin_pass", ""))) < 12:
+                return self._json(400, {"error": "La contraseña administrativa debe tener al menos 12 caracteres"})
+            if merged.get("gitops_token") and merged.get("github_org"):
+                gh = validate_github(merged["gitops_token"], merged["github_org"])
+                if gh.get("valid"):
+                    merged["gitops_url"] = gh.get("gitops_url", merged.get("gitops_url", ""))
+                    merged["github_login"] = gh.get("login", "")
+                    merged["github_bootstrap"] = bool(gh.get("bootstrap_needed"))
+            save_credentials(merged)
             INSTALLING = True
-            threading.Thread(target=do_install, args=(body,), daemon=True).start()
+            threading.Thread(target=do_install, args=(merged,), daemon=True).start()
             return self._json(202, {"message": "Instalación iniciada", "stream": "/api/stream"})
 
         self.send_error(404)
+
+
+def _shutdown_privileged_installer():
+    time.sleep(1.0)
+    for path in ("/run/kaanbal-installer/token", "/etc/kaanbal/installer-runtime.env"):
+        try:
+            os.remove(path)
+        except FileNotFoundError:
+            pass
+    if PRIVILEGED:
+        subprocess.Popen(
+            ["systemctl", "disable", "--now", "kaanbal-installer.service"],
+            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+        )
+
+
+def _kill_port(port):
+    try:
+        subprocess.run(["fuser", "-k", f"{port}/tcp"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=5)
+        time.sleep(0.5)
+    except Exception:
+        pass
+
+
+def _acuaponsito_token_ok():
+    """True si el runtime en :4600 acepta el TOKEN actual del instalador."""
+    try:
+        url = f"http://127.0.0.1:4600/api/boot?token={urllib.parse.quote(TOKEN, safe='')}"
+        with urllib.request.urlopen(url, timeout=2) as resp:
+            return resp.status == 200
+    except Exception:
+        return False
 
 
 def _launch_agent_runtime():
@@ -1209,17 +2656,23 @@ def _launch_agent_runtime():
         os.path.dirname(os.path.abspath(__file__)), "..", "acuaponsito", "server.py"))
     if not os.path.isfile(runtime):
         return None
-    try:  # ¿ya está corriendo?
+    running = False
+    try:
         socket.create_connection(("127.0.0.1", 4600), timeout=1).close()
-        return "existente"
+        running = True
     except OSError:
         pass
+    if running:
+        if _acuaponsito_token_ok():
+            return "existente"
+        # Runtime viejo con otro token (p. ej. tras reiniciar el instalador)
+        _kill_port(4600)
     env = {**os.environ, "ACUA_TOKEN": TOKEN}
     if ANIM_DIR:
         env["KAANBAL_ANIM_DIR"] = ANIM_DIR
     subprocess.Popen([sys.executable, runtime], env=env,
                      stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-    return "lanzado"
+    return "relanzado" if running else "lanzado"
 
 
 def main():

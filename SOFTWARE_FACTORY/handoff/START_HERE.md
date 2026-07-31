@@ -5,8 +5,12 @@ This folder is the minimum context package to continue work on another laptop or
 
 ## Read Order For Any New Agent
 1. Read `SOFTWARE_FACTORY/handoff/START_HERE.md`
-2. Read `SOFTWARE_FACTORY/handoff/CURRENT_STATE.md`
-3. Read `SOFTWARE_FACTORY/handoff/FLOW_CONTRACT.md`
+2. Read `SOFTWARE_FACTORY/docs/EXPOSURE_LIFECYCLE_BITACORA.md` ← **plan activo exposición/bindings/instalador**
+3. Read `.cursor/skills/exposure-lifecycle/SKILL.md`
+4. Read `SOFTWARE_FACTORY/handoff/CURRENT_STATE.md`
+5. Read `SOFTWARE_FACTORY/handoff/FLOW_CONTRACT.md`
+
+**Frase para retomar:** `continua bitácora exposición` o slash `/kaanbal-exposure`
 
 ## Current Canonical Repos
 - `SOFTWARE_FACTORY/kaanbal-api`

@@ -1,0 +1,11 @@
+
+  ╭──────────────────────────────────────────╮
+  │         Modo consola · Kaanbal           │
+  ╰──────────────────────────────────────────╯
+
+  Para volver a la interfaz a pantalla completa:
+
+      sudo kaanbal-ui
+
+  (Atajo: Ctrl+Alt+F1 también funciona si el kiosk sigue activo en otra tty)
+

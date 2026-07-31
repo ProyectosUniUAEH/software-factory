@@ -1,0 +1,25 @@
+# SF-7 Preflight — kaanbal-lab — 2026-07-26
+host:
+  name: andres
+  address: 192.168.1.198
+  ssh_alias: andres-lan
+  os: Ubuntu (kernel 7.0.0-28-generic)
+  arch: x86_64
+  cpu: null  # lscpu pendiente si se necesita detalle
+  memory:
+    total: 14Gi
+    available: 14Gi
+  storage:
+    root: /dev/mapper/ubuntu--vg-ubuntu--lv
+    size: 98G
+    used: 7.3G
+    avail: 86G
+  network:
+    primary: wlp0s20f3 (WiFi)
+    ip: 192.168.1.198/24
+    ethernet: enp0s31f6 DOWN
+  notes:
+    - systemd-networkd-wait-online.service failed (no bloqueante para lab WiFi)
+    - Disco sda NTFS presente (223G) — no usar para K3s sin revisar
+    - RAM y disco OK para lab-standard (≥4GB, ≥20GB libre)
+  preflight_status: PASS

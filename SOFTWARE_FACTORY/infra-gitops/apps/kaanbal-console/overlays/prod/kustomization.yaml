@@ -12,7 +12,9 @@ commonLabels:
 patchesStrategicMerge:
   - patch-deployment-labels.yaml
 
+# El tag lo fija el instalador en el bootstrap y a partir de ahí lo actualiza
+# el workflow de GitHub Actions del repo kaanbal-console en cada push a main.
 images:
   - name: kaanbal-console-image
-    newName: andresupmh/kaanbal-console
-    newTag: prod-6ed8f43
+    newName: ${KAANBAL_DOCKER_USER}/kaanbal-console
+    newTag: ${KAANBAL_CONSOLE_TAG}

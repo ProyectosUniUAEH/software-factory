@@ -12,7 +12,9 @@ commonLabels:
 patchesStrategicMerge:
   - patch-deployment-labels.yaml
 
+# El tag lo fija el instalador en el bootstrap y a partir de ahí lo actualiza
+# el workflow de GitHub Actions del repo kaanbal-api en cada push a main.
 images:
   - name: kaanbal-api-image
-    newName: andresupmh/kaanbal-api
-    newTag: prod-55ad5b2
+    newName: ${KAANBAL_DOCKER_USER}/kaanbal-api
+    newTag: ${KAANBAL_API_TAG}

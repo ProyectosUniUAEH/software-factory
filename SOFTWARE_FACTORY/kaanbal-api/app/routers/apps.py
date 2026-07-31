@@ -500,7 +500,15 @@ async def get_deploy_log_detail(app_name: str, log_id: str):
 
 
 # Core apps that cannot be deleted — they are part of the platform infrastructure
-CORE_APP_NAMES = {"datastore", "kaanbal-api", "kaanbal-console", "vault", "tailscale-operator"}
+CORE_APP_NAMES = {
+    "datastore", "kaanbal-api", "kaanbal-console", "kaanbal-agent",
+    "vault", "tailscale-operator", "cloudflared",
+}
+# ArgoCD Application names that must never be deleted by maintenance/wipe helpers
+PROTECTED_ARGOCD_APPS = {
+    "applicationsets", "core-config", "vault", "tailscale-operator",
+    "root", "app-of-apps",
+}
 
 
 @router.delete("/{app_id}")
@@ -1210,3 +1218,308 @@ async def update_tailscale_tags(app_name: str, body: dict, current_user: User = 
         "applied_to_cluster": applied_envs,
         "note": "Tags updated. Configure Tailscale ACL policy to enforce access rules based on these tags."
     }
+
+
+@router.patch("/{app_name}/exposure")
+async def switch_app_exposure(
+    app_name: str,
+    body: dict,
+    current_user: User = Depends(get_current_active_user),
+):
+    """Change per-env exposure after deploy (public/tailscale/lan/internal/off/both).
+
+    Body:
+      {
+        "per_env": { "dev": "tailscale", "prod": "public" },
+        "port_exposure": { ... }   # optional
+      }
+    """
+    db = get_db()
+    app = await db.apps.find_one({"name": app_name})
+    if not app:
+        raise HTTPException(status_code=404, detail="App not found")
+
+    per_env = body.get("per_env") or {}
+    if not isinstance(per_env, dict) or not per_env:
+        raise HTTPException(status_code=400, detail="Body must include non-empty per_env map")
+
+    port_exposure = body.get("port_exposure")
+    deployer = AppDeployer()
+    from app.services.exposure import ExposureSwitchService
+    switcher = ExposureSwitchService(deployer)
+
+    try:
+        result = await switcher.switch(
+            app_doc=app,
+            per_env=per_env,
+            port_exposure=port_exposure,
+            actor=current_user.username,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+    except Exception as exc:
+        logger.exception("exposure switch failed for %s", app_name)
+        raise HTTPException(status_code=500, detail=str(exc)[:300])
+
+    await db.apps.update_one(
+        {"name": app_name},
+        {"$set": {
+            "exposure": result["exposure"],
+            "connection_info": {
+                **(app.get("connection_info") or {}),
+                "per_env_exposure": result.get("connection_info") or {},
+            },
+            "connection_inventory": result.get("connection_inventory") or {},
+            "status": "offline" if any(
+                str(m).lower() == "off" for m in (result["exposure"].get("per_env") or {}).values()
+            ) and all(
+                str(m).lower() == "off" for m in (result["exposure"].get("per_env") or {}).values()
+            ) else app.get("status", "healthy"),
+            "updated_at": datetime.utcnow(),
+        }},
+    )
+
+    await activity_log.log(
+        "app.exposure.switched",
+        category=CATEGORY_APP,
+        actor=current_user.username,
+        target=app_name,
+        detail={
+            "per_env": per_env,
+            "publishers": result.get("publishers"),
+            "validated": result.get("validated"),
+            "drift": result.get("drift"),
+            "pending": result.get("pending"),
+        },
+    )
+    return result
+
+
+@router.get("/{app_name}/exposure/status")
+async def get_app_exposure_status(
+    app_name: str,
+    current_user: User = Depends(get_current_active_user),
+):
+    """Read-only reconcile: refresh observed inventory (Ingress/TS/HTTP) without mutating GitOps.
+
+    Use after a switch returns validated=false (Argo/CF race) — console can poll until ready.
+    """
+    db = get_db()
+    app = await db.apps.find_one({"name": app_name})
+    if not app:
+        raise HTTPException(status_code=404, detail="App not found")
+
+    deployer = AppDeployer()
+    from app.services.exposure import ExposureSwitchService
+    switcher = ExposureSwitchService(deployer)
+    try:
+        result = await switcher.refresh_status(app_doc=app)
+    except Exception as exc:
+        logger.exception("exposure status failed for %s", app_name)
+        raise HTTPException(status_code=500, detail=str(exc)[:300])
+
+    await db.apps.update_one(
+        {"name": app_name},
+        {"$set": {
+            "connection_info": {
+                **(app.get("connection_info") or {}),
+                "per_env_exposure": result.get("connection_info") or {},
+            },
+            "connection_inventory": result.get("connection_inventory") or {},
+            "updated_at": datetime.utcnow(),
+        }},
+    )
+    return result
+
+
+@router.post("/{app_name}/environments/{env}/scale")
+async def scale_app_environment(
+    app_name: str,
+    env: str,
+    body: dict,
+    current_user: User = Depends(get_current_active_user),
+):
+    """Scale replicas for one environment. Body: { \"replicas\": N } (0 = stop)."""
+    db = get_db()
+    app = await db.apps.find_one({"name": app_name})
+    if not app:
+        raise HTTPException(status_code=404, detail="App not found")
+    if env not in (app.get("environments") or []):
+        raise HTTPException(status_code=400, detail=f"Environment '{env}' not deployed for this app")
+
+    replicas = body.get("replicas")
+    if replicas is None or not isinstance(replicas, int):
+        raise HTTPException(status_code=400, detail="Body must include integer replicas")
+
+    deployer = AppDeployer()
+    from app.services.exposure import ExposureSwitchService
+    switcher = ExposureSwitchService(deployer)
+    try:
+        result = await switcher.scale_env(
+            app_doc=app, env=env, replicas=replicas, actor=current_user.username
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+    except Exception as exc:
+        logger.exception("scale failed for %s/%s", app_name, env)
+        raise HTTPException(status_code=500, detail=str(exc)[:300])
+
+    await db.apps.update_one(
+        {"name": app_name},
+        {"$set": {
+            "status": result.get("status") or app.get("status"),
+            f"specs_by_env.{env}.replicas": replicas,
+            "updated_at": datetime.utcnow(),
+        }},
+    )
+    await activity_log.log(
+        "app.env.scaled",
+        category=CATEGORY_APP,
+        actor=current_user.username,
+        target=app_name,
+        detail={"env": env, "replicas": replicas},
+    )
+    return result
+
+
+@router.post("/{app_name}/environments/{env}/stop")
+async def stop_app_environment(
+    app_name: str,
+    env: str,
+    current_user: User = Depends(get_current_active_user),
+):
+    return await scale_app_environment(
+        app_name=app_name,
+        env=env,
+        body={"replicas": 0},
+        current_user=current_user,
+    )
+
+
+@router.post("/{app_name}/environments/{env}/start")
+async def start_app_environment(
+    app_name: str,
+    env: str,
+    body: dict = None,
+    current_user: User = Depends(get_current_active_user),
+):
+    replicas = 1
+    if body and isinstance(body.get("replicas"), int) and body["replicas"] > 0:
+        replicas = body["replicas"]
+    else:
+        db = get_db()
+        app = await db.apps.find_one({"name": app_name}, {"specs": 1})
+        if app:
+            replicas = int((app.get("specs") or {}).get("replicas") or 1) or 1
+    return await scale_app_environment(
+        app_name=app_name,
+        env=env,
+        body={"replicas": replicas},
+        current_user=current_user,
+    )
+
+
+@router.post("/{app_name}/environments/{env}")
+async def ensure_app_environment(
+    app_name: str,
+    env: str,
+    body: dict = None,
+    current_user: User = Depends(get_current_active_user),
+):
+    """Enable / create an environment overlay for an existing app.
+
+    Body (optional): { \"exposure\": \"tailscale\" }
+    """
+    db = get_db()
+    app = await db.apps.find_one({"name": app_name})
+    if not app:
+        raise HTTPException(status_code=404, detail="App not found")
+
+    mode = "tailscale"
+    if body and isinstance(body, dict) and body.get("exposure"):
+        mode = str(body["exposure"])
+
+    deployer = AppDeployer()
+    from app.services.exposure import ExposureSwitchService
+    switcher = ExposureSwitchService(deployer)
+    try:
+        result = await switcher.ensure_env(
+            app_doc=app, env=env, exposure_mode=mode, actor=current_user.username
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+    except Exception as exc:
+        logger.exception("ensure env failed for %s/%s", app_name, env)
+        raise HTTPException(status_code=500, detail=str(exc)[:300])
+
+    await db.apps.update_one(
+        {"name": app_name},
+        {"$set": {
+            "environments": result["environments"],
+            "exposure": result.get("exposure") or app.get("exposure"),
+            "connection_info": {
+                **(app.get("connection_info") or {}),
+                "per_env_exposure": result.get("connection_info") or {},
+            },
+            "updated_at": datetime.utcnow(),
+        }},
+    )
+    await activity_log.log(
+        "app.env.enabled",
+        category=CATEGORY_APP,
+        actor=current_user.username,
+        target=app_name,
+        detail={"env": env, "exposure": mode},
+    )
+    return result
+
+
+@router.delete("/{app_name}/environments/{env}")
+async def remove_app_environment(
+    app_name: str,
+    env: str,
+    delete_overlay: bool = False,
+    current_user: User = Depends(get_current_active_user),
+):
+    """Disable an environment (scale 0 + exposure off). Optionally delete overlay."""
+    db = get_db()
+    app = await db.apps.find_one({"name": app_name})
+    if not app:
+        raise HTTPException(status_code=404, detail="App not found")
+
+    deployer = AppDeployer()
+    from app.services.exposure import ExposureSwitchService
+    switcher = ExposureSwitchService(deployer)
+    try:
+        result = await switcher.remove_env(
+            app_doc=app,
+            env=env,
+            actor=current_user.username,
+            delete_overlay=delete_overlay,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+    except Exception as exc:
+        logger.exception("remove env failed for %s/%s", app_name, env)
+        raise HTTPException(status_code=500, detail=str(exc)[:300])
+
+    await db.apps.update_one(
+        {"name": app_name},
+        {"$set": {
+            "environments": result["environments"],
+            "exposure": result.get("exposure") or app.get("exposure"),
+            "connection_info": {
+                **(app.get("connection_info") or {}),
+                "per_env_exposure": result.get("connection_info") or {},
+            },
+            "updated_at": datetime.utcnow(),
+        }},
+    )
+    await activity_log.log(
+        "app.env.removed",
+        category=CATEGORY_APP,
+        actor=current_user.username,
+        target=app_name,
+        detail={"env": env, "delete_overlay": delete_overlay},
+    )
+    return result

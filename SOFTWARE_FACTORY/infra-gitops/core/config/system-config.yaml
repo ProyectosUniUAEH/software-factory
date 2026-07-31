@@ -16,21 +16,41 @@ data:
   # ============================================================================
   # Domain Configuration
   # ============================================================================
-  domain: "futurefarms.mx"
-  
+  domain: "${KAANBAL_DOMAIN}"
+
   # ============================================================================
-  # Git Configuration  
+  # Reserved Hostnames
+  # ============================================================================
+  # Subdominios del engine. Kaanbal Console rechaza crear apps de usuario con
+  # estos nombres para que un "fago" o un "api" nunca tumbe el control plane.
+  reserved.hosts: "kaanbal,kaanbal-console,kaanbal-api,kaanbal-agent,kaanbal-argo,kaanbal-gitops,argocd,vault,datastore,www"
+
+  # ============================================================================
+  # Git Configuration
   # ============================================================================
   git.provider: "github"
-  git.workspace: "futurefarms-softwarefactory"
-  git.infra-repo: "infra-gitops"
+  git.workspace: "${KAANBAL_GITHUB_ORG}"
+  git.infra-repo: "${KAANBAL_GITOPS_REPO}"
   git.default-branch: "main"
-  
+
+  # ============================================================================
+  # Ingress
+  # ============================================================================
+  # Clase real del cluster. AppDeployer la usa al generar los Ingress de las
+  # apps: si no coincide con un controlador instalado, la app se despliega pero
+  # nunca recibe tráfico.
+  ingress.class: "${KAANBAL_INGRESS_CLASS}"
+  # Vacío = TLS lo termina Cloudflare en el edge y cert-manager no interviene.
+  ingress.cluster-issuer: "${KAANBAL_CLUSTER_ISSUER_CONFIG}"
+
   # ============================================================================
   # Exposure Defaults
   # ============================================================================
-  exposure.default: "private"
-  exposure.tailscale-domain: "tail11dd4e.ts.net"
+  # internal = solo dentro del cluster. Coincide con el default de AppDeployer;
+  # la consola sube una app a "tailscale" (VPN) o "public" cuando el usuario lo
+  # pide explícitamente.
+  exposure.default: "internal"
+  exposure.tailscale-domain: "${KAANBAL_TAILNET}"
   
   # ============================================================================
   # Templates Available

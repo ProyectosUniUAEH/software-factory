@@ -4,6 +4,8 @@ kind: Kustomization
 resources:
   - deployment.yaml
   - service.yaml
-  - ingress.yaml
   - rbac.yaml
   - bootstrap-admin-job.yaml
+# @kaanbal:if API_PUBLIC
+  - ingress.yaml
+# @kaanbal:endif

@@ -23,9 +23,38 @@ router = APIRouter(dependencies=[Depends(get_current_active_user)])
 _VALID_ENVS = {"dev", "staging", "prod"}
 
 
+_PORT_NAME_DEFAULTS = {
+    "http": 80,
+    "https": 443,
+    "db": None,  # resolved from template below
+    "postgres": 5432,
+    "postgresql": 5432,
+    "mongo": 27017,
+    "mongodb": 27017,
+    "mysql": 3306,
+    "redis": 6379,
+    "mqtt": 1883,
+    "ws": 8083,
+    "dashboard": 18083,
+    "amqp": 5672,
+}
+
+_TEMPLATE_PORT_DEFAULTS = {
+    "mongodb": 27017,
+    "mongo": 27017,
+    "postgres": 5432,
+    "postgresql": 5432,
+    "mysql": 3306,
+    "redis": 6379,
+    "n8n": 5678,
+    "emqx": 18083,
+    "fastapi-api": 8000,
+}
+
+
 async def _resolve_port_number(db, app_name: str, port_name: str) -> Optional[int]:
     """Resolver el puerto numérico desde la definición multi-puerto de la app,
-    o su puerto principal como fallback."""
+    o su puerto principal / template como fallback."""
     app = await db.apps.find_one({"name": app_name})
     if not app:
         return None
@@ -34,6 +63,28 @@ async def _resolve_port_number(db, app_name: str, port_name: str) -> Optional[in
         if port_def.get("name") == port_name:
             return port_def.get("port")
     specs = app.get("specs") or {}
+    if specs.get("port") and port_name in ("http", "https", ""):
+        return specs.get("port")
+
+    # Logical DB/MQTT aliases → template defaults (database_bindings parity)
+    named = _PORT_NAME_DEFAULTS.get(port_name)
+    if named:
+        return named
+
+    template = (app.get("template") or app.get("template_id") or "").lower()
+    for key, port in _TEMPLATE_PORT_DEFAULTS.items():
+        if key in template:
+            if port_name in ("db", "http", "tcp", ""):
+                return port
+            if port_name in key or key in port_name:
+                return port
+            # e.g. port_name=db + template=postgres
+            if port_name == "db" and key in ("postgres", "postgresql", "mongodb", "mongo", "mysql", "redis"):
+                return port
+    if port_name == "db":
+        for key, port in _TEMPLATE_PORT_DEFAULTS.items():
+            if key in template:
+                return port
     return specs.get("port")
 
 

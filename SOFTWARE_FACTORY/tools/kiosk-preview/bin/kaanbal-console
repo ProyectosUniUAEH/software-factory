@@ -1,0 +1,16 @@
+#!/usr/bin/env bash
+# Sale del kiosk y restaura consola en tty1 (modo técnico).
+set -euo pipefail
+
+KIOSK_UNIT="${KAANBAL_KIOSK_UNIT:-kaanbal-kiosk-preview.service}"
+MODE_UNIT="${KAANBAL_MODE_UNIT:-kaanbal-mode-switch.service}"
+RETURN_MSG="${KAANBAL_RETURN_MSG:-/etc/kaanbal/console-return.txt}"
+
+systemctl stop "$KIOSK_UNIT" "$MODE_UNIT" 2>/dev/null || true
+systemctl start getty@tty1.service
+chvt 1
+
+if [[ -f "$RETURN_MSG" ]]; then
+  cat "$RETURN_MSG"
+  cat "$RETURN_MSG" | wall 2>/dev/null || true
+fi

@@ -18,7 +18,7 @@ metadata:
 spec:
   project: software-factory
   source:
-    repoURL: https://github.com/futurefarms-softwarefactory/infra-gitops.git
+    repoURL: https://github.com/ProyectosUniUAEH/infra-gitops.git
     targetRevision: HEAD
     path: apps/tailscale-operator/overlays/dev
   destination:

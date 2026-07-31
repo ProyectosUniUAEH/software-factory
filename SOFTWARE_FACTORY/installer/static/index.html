@@ -166,23 +166,59 @@
         <b>Credenciales de la plataforma</b>
         <span class="opt">conecta lo que necesites — cada validación deja lista una capa de la célula base</span>
       </div>
+      <div class="env-import glass-soft">
+        <div>
+          <b>Restaurar configuración</b>
+          <p>Carga un <span class="mono">.env</span> local. Se guarda protegido por permisos del sistema
+            (<span class="mono">root:root 600</span>) y los secretos no vuelven a mostrarse.</p>
+        </div>
+        <label class="btn btn-ghost btn-sm" for="f-env-file">Cargar .env</label>
+        <input class="hidden" type="file" id="f-env-file" accept=".env,text/plain">
+        <span class="val-msg" id="msg-env"></span>
+      </div>
+
+      <details class="gitops-box glass-soft cred-card" open>
+        <summary>🔑 Administrador Kaanbal <span class="cred-role">reemplaza al token temporal al finalizar</span>
+          <span class="cred-state" id="st-admin"></span></summary>
+        <div class="fields">
+          <label>Usuario <input type="text" id="f-admin-user" value="admin" autocomplete="username"></label>
+          <label>Contraseña
+            <input type="password" id="f-admin-pass" placeholder="mínimo 12 caracteres" autocomplete="new-password">
+          </label>
+          <p class="guide-note">Se crea como Secret de bootstrap para la API. Al terminar deberás escribirla
+            otra vez para revocar el token del instalador.</p>
+        </div>
+      </details>
 
       <!-- GITHUB / GITOPS -->
       <details class="gitops-box glass-soft cred-card">
         <summary>🐙 GitHub <span class="cred-role">GitOps · el repo que ArgoCD reconcilia</span>
           <span class="cred-state" id="st-gh"></span></summary>
         <div class="fields">
-          <label>URL del repo infra-gitops <input type="text" id="f-git-url" placeholder="https://github.com/tu-org/infra-gitops.git"></label>
-          <label>Personal Access Token <input type="password" id="f-git-token" placeholder="github_pat_..."></label>
+          <label>Personal Access Token
+            <input type="password" id="f-git-token" placeholder="ghp_... (classic) o github_pat_... (fine-grained)" autocomplete="off">
+          </label>
+          <div id="gh-org-row" class="hidden">
+            <label>Instalar en
+              <select id="f-git-org">
+                <option value="">— elige org o cuenta personal —</option>
+              </select>
+            </label>
+          </div>
+          <div id="gh-url-row" class="hidden gh-url-row">
+            <span class="gh-url-label">Repo GitOps (fuente de verdad)</span>
+            <code class="mono gh-url-preview" id="gh-url-preview"></code>
+            <input type="hidden" id="f-git-url">
+          </div>
+          <ul id="gh-repos-list" class="gh-repos-list hidden"></ul>
           <details class="guide">
-            <summary>📘 Guía · crear el PAT (fine-grained)</summary>
+            <summary>📘 Guía · crear el PAT</summary>
             <ol>
-              <li>Ve a <a href="https://github.com/settings/tokens?type=beta" target="_blank" rel="noopener">github.com/settings/tokens?type=beta</a> → <b>Generate new token</b>.</li>
-              <li><b>Repository access</b> → <i>Only select repositories</i> → tu <span class="mono">infra-gitops</span>.</li>
-              <li><b>Permissions</b>: <span class="mono">Contents · Read-only</span>, <span class="mono">Metadata · Read-only</span>, y opcional <span class="mono">Email addresses · Read-only</span>.</li>
-              <li><b>Generate token</b> y cópialo (<span class="mono">github_pat_...</span>).</li>
+              <li><b>Classic (recomendado para bootstrap)</b>: <a href="https://github.com/settings/tokens" target="_blank" rel="noopener">github.com/settings/tokens</a> → scopes <span class="mono">repo</span>, <span class="mono">read:org</span>, <span class="mono">user:email</span>.</li>
+              <li>Debes ser <b>admin</b> de la org para que el instalador cree los repos core.</li>
+              <li>Pega el token → <b>Validar</b> → elige la org. Si faltan repos, se crean al desplegar.</li>
             </ol>
-            <p class="guide-note">Tu usuario y correo se detectan solos al validar — no los escribas a mano.</p>
+            <p class="guide-note"><b>Repos core:</b> <span class="mono">infra-gitops</span> (manifiestos/ramas), <span class="mono">kaanbal-api</span>, <span class="mono">kaanbal-console</span>. Ahí vive el GitFlow de ambientes.</p>
           </details>
           <div class="validate-row">
             <button class="btn btn-ghost btn-sm" id="btn-val-gh">Validar GitHub</button>
@@ -238,6 +274,27 @@
         </div>
       </details>
 
+      <!-- EXPOSICIÓN DE LA CONSOLA -->
+      <details class="gitops-box glass-soft cred-card">
+        <summary>🛡️ Exposición de Kaanbal Console <span class="cred-role">quién puede llegar al panel</span>
+          <span class="cred-state" id="st-exposure"></span></summary>
+        <div class="fields">
+          <label class="radio-row">
+            <input type="radio" name="console-exposure" value="public" id="f-exp-public" checked>
+            <span><b>Pública en tu dominio</b> — <span class="mono">kaanbal.tudominio</span> por HTTPS de
+              Cloudflare. Entras desde cualquier lugar con usuario y contraseña.</span>
+          </label>
+          <label class="radio-row">
+            <input type="radio" name="console-exposure" value="tailnet" id="f-exp-tailnet">
+            <span><b>Solo por VPN Tailscale</b> — el panel no sale a internet; únicamente responde a
+              dispositivos de tu tailnet. Requiere Tailscale configurado arriba.</span>
+          </label>
+          <p class="guide-note">Esto solo decide cómo se publica <b>el panel</b>. La exposición de cada app
+            que despliegues (pública, VPN o solo interna) se elige después, app por app, dentro de la
+            consola.</p>
+        </div>
+      </details>
+
       <div class="actions">
         <button class="btn btn-ghost" id="btn-back-ia">← Atrás</button>
         <button class="btn btn-primary" id="btn-deploy">Desplegar célula <span class="arrow">⚡</span></button>
@@ -256,8 +313,11 @@
           <li data-step="argocd"><span class="s-ico">🔄</span><div><b>ArgoCD</b><small>GitOps controller</small></div><span class="s-state"></span></li>
           <li data-step="ia"><span class="s-ico">🤖</span><div><b>Agente IA</b><small>proveedores al cluster</small></div><span class="s-state"></span></li>
           <li data-step="cloudflared"><span class="s-ico">🌐</span><div><b>Túnel público</b><small>Cloudflare, sin puertos</small></div><span class="s-state"></span></li>
-          <li data-step="gitops"><span class="s-ico">📦</span><div><b>GitOps</b><small>app-of-apps</small></div><span class="s-state"></span></li>
-          <li data-step="acceso"><span class="s-ico">🔑</span><div><b>Acceso</b><small>credenciales y handoff</small></div><span class="s-state"></span></li>
+          <li data-step="repos"><span class="s-ico">🗂️</span><div><b>Repos</b><small>GitHub + baseline con tu dominio</small></div><span class="s-state"></span></li>
+          <li data-step="imagenes"><span class="s-ico">🏗️</span><div><b>Imágenes</b><small>construyendo el engine</small></div><span class="s-state"></span></li>
+          <li data-step="gitops"><span class="s-ico">📦</span><div><b>GitOps</b><small>ArgoCD despliega el engine</small></div><span class="s-state"></span></li>
+          <li data-step="plataforma"><span class="s-ico">⚙️</span><div><b>Plataforma</b><small>config y pipelines</small></div><span class="s-state"></span></li>
+          <li data-step="acceso"><span class="s-ico">🔑</span><div><b>Acceso</b><small>verificando tus URLs</small></div><span class="s-state"></span></li>
         </ol>
         <div class="terminal glass-soft">
           <div class="term-head">
@@ -275,10 +335,15 @@
       <h2>🎉 Tu célula <span class="grad" id="done-node">kaanbal</span> está viva</h2>
       <p class="lede">Kubernetes reconciliando, GitOps activo, agente IA integrado. Desde aquí todo se opera por Git y la consola.</p>
       <div class="handoff glass-soft">
-        <div class="h-row" id="h-domain-row" style="display:none"><span class="h-k">🌐 Tu plataforma</span>
+        <div class="h-row" id="h-domain-row" style="display:none"><span class="h-k">kaanbal-console</span>
           <span class="h-v"><a id="h-console" href="#" target="_blank" rel="noopener"></a>
-            <span class="tag tag-rec" style="margin-left:8px">EN VIVO · HTTPS</span></span></div>
-        <div class="h-row"><span class="h-k">Panel GitOps (ArgoCD)</span>
+            <span class="tag tag-rec" id="h-console-tag" style="margin-left:8px">UI · APPS</span></span></div>
+        <div class="h-row" id="h-api-row" style="display:none"><span class="h-k">kaanbal-api</span>
+          <span class="h-v"><a id="h-api" href="#" target="_blank" rel="noopener"></a></span></div>
+        <div class="h-row" id="h-agent-row" style="display:none"><span class="h-k">kaanbal-agent</span>
+          <span class="h-v"><a id="h-agent" href="#" target="_blank" rel="noopener"></a>
+            <span class="tag" style="margin-left:8px">ACUAPONSITO</span></span></div>
+        <div class="h-row"><span class="h-k">kaanbal-argo</span>
           <span class="h-v"><a id="h-url" href="#" target="_blank" rel="noopener">https://localhost:8080</a></span></div>
         <div class="h-row"><span class="h-k">Usuario</span><span class="h-v mono">admin</span></div>
         <div class="h-row"><span class="h-k">Contraseña</span>
@@ -291,13 +356,28 @@
       <div class="next glass-soft">
         <b>Siguientes pasos</b>
         <ul>
-          <li>🔗 Registra esta célula en tu cerebro Kaanbal: <span class="mono">POST /api/v1/sites</span></li>
-          <li>🌐 ¿Sin túnel aún? Genera uno en la consola y ArgoCD desplegará <span class="mono">apps/cloudflared</span></li>
-          <li>🚀 Lanza tu primera app desde una plantilla — frontend, API, BD, EMQX, n8n</li>
+          <li>🚀 Entra a la consola y lanza tu primera app desde una plantilla (Vue 3, FastAPI, MongoDB, n8n).
+            Kaanbal le crea su repo, su pipeline y su subdominio <span class="mono">app.tudominio</span>.</li>
+          <li>🛡️ Al crear cada app eliges su exposición: pública, solo por VPN Tailscale, o solo interna.</li>
+          <li>🔄 Los repos del engine ya tienen sus secrets de GitHub Actions: un push a
+            <span class="mono">main</span> reconstruye la imagen y ArgoCD la despliega solo.</li>
         </ul>
       </div>
       <div class="actions">
         <a class="btn btn-primary" id="btn-open-argo" href="https://localhost:8080" target="_blank" rel="noopener">Abrir panel ⚡</a>
+      </div>
+      <div class="finalize glass-soft">
+        <b>Cerrar instalación privilegiada</b>
+        <p>Confirma el acceso administrativo. Después, el token de esta URL se revoca y el servicio
+          instalador se apaga; Kaanbal continuará funcionando normalmente.</p>
+        <div class="fields final-fields">
+          <label>Usuario <input type="text" id="f-final-user" autocomplete="username"></label>
+          <label>Contraseña <input type="password" id="f-final-pass" autocomplete="current-password"></label>
+        </div>
+        <div class="validate-row">
+          <button class="btn btn-primary" id="btn-finalize">Confirmar y cerrar instalador</button>
+          <span class="val-msg" id="msg-finalize"></span>
+        </div>
       </div>
     </div>
 

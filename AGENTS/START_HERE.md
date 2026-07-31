@@ -4,12 +4,21 @@
 This folder is the root entrypoint for any new agent or new chat session.
 
 ## Read Order
-1. `AGENTS/START_HERE.md` ← este archivo
-2. `AGENTS/STATE.md` ← estado actual del sistema
-3. `AGENTS/sessions/` ← leer los **últimos 2 archivos** ordenados por fecha (más recientes primero)
-4. `SOFTWARE_FACTORY/handoff/FLOW_CONTRACT.md` ← contrato operativo completo
+1. `AGENTS.md` (raíz del repo) ← contrato corto para Cursor
+2. `AGENTS/START_HERE.md` ← este archivo (continuidad operativa)
+3. `docs/CONTEXT_MAP.yaml` ← grafo de contexto
+4. `KAANBAL_IMPLEMENTATION_STATUS.md` ← estado de fases
+5. `AGENTS/STATE.md` ← snapshot operativo
+6. `AGENTS/sessions/` ← últimos 2 archivos
+7. `SOFTWARE_FACTORY/handoff/FLOW_CONTRACT.md` ← contrato de entrega (legacy VPS; adaptar a lab local)
 
-## Session Log (Historial de Trabajo)
+## Enlaces activos (2026-07-26)
+
+- Jira: https://asistenteia97.atlassian.net/jira/software/projects/SF
+- Miro: https://miro.com/app/board/uXjVH3hIUGE=/
+- Lab SSH: `ssh andres-lan` (192.168.1.198)
+
+## Canonical Project Location
 - Carpeta: `AGENTS/sessions/`
 - Convención de nombre: `YYYY-MM-DD-HHMM-tema-corto.md`
 - Los archivos se ordenan cronológicamente por nombre automáticamente.
@@ -23,8 +32,9 @@ This folder is the root entrypoint for any new agent or new chat session.
 - `SOFTWARE_FACTORY_SECRETS/`
 
 ## Operational Contract (Mandatory)
-1. Work only against org repos under `futurefarms-softwarefactory`.
-2. Delivery is complete only after this chain:
+1. Trabajar con ticket Jira **SF-XXX** (proyecto SF, site asistenteia97).
+2. Org POC actual: `ProyectosUniUAEH` (ver ADR-001 en `docs/adr/`).
+3. Delivery is complete only after this chain:
 	1. Push to main
 	2. CI success
 	3. `infra-gitops` updated

@@ -1,0 +1,95 @@
+# Grafo de contexto Kaanbal — el agente lee esto para decidir qué cargar.
+# Actualizar cuando se agreguen docs, reglas o skills.
+
+version: 1
+updated: 2026-07-28
+
+tracks:
+  producto:
+    repo: ProyectosUniUAEH/software-factory
+    jira_project: SF
+    jira_site: asistenteia97.atlassian.net
+  academico:
+    repo: ProyectosUniUAEH/kaanbal-research
+    confluence_space: SoftwareFa  # resúmenes públicos; datos sensibles solo en repo privado
+
+always_read:
+  - path: AGENTS.md
+    reason: identidad y reglas cortas
+  - path: docs/CONTEXT_MAP.yaml
+    reason: router de contexto
+  - path: SOFTWARE_FACTORY/docs/EXPOSURE_LIFECYCLE_BITACORA.md
+    reason: plan activo exposición/bindings (si el chat habla de deploy/VPN/DNS/matrix)
+
+on_issue_start:
+  - path: KAANBAL_IMPLEMENTATION_STATUS.md
+  - path: AGENTS/STATE.md
+  - jira: ticket descripcion y criterios de aceptacion
+
+by_area:
+  installer:
+    globs: ["SOFTWARE_FACTORY/installer/**", "SOFTWARE_FACTORY/softwarefactory/**"]
+    read:
+      - docs/architecture/KAANBAL_LOCAL_V0.md
+      - SOFTWARE_FACTORY/installer/README.md
+    rules: [".cursor/rules/12-installer.mdc"]
+
+  kaanbal_api:
+    globs: ["SOFTWARE_FACTORY/kaanbal-api/**"]
+    read:
+      - SOFTWARE_FACTORY/kaanbal-api/README.md
+    rules: [".cursor/rules/10-api.mdc"]
+
+  kaanbal_console:
+    globs: ["SOFTWARE_FACTORY/kaanbal-console/**"]
+    rules: [".cursor/rules/11-console.mdc"]
+
+  gitops:
+    globs: ["SOFTWARE_FACTORY/infra-gitops/**"]
+    read:
+      - SOFTWARE_FACTORY/infra-gitops/ARCHITECTURE.md
+    rules: [".cursor/rules/13-gitops.mdc"]
+
+  fagolab:
+    globs: ["../fago-sistema/**"]
+    read:
+      - ../fago-sistema/fago-api/.env.example
+    rules: [".cursor/rules/16-fagolab.mdc"]
+
+  lab_server:
+    trigger: "ssh andres-lan, 192.168.1.198, preflight, inventario"
+    read:
+      - docs/contracts/LAB_SERVER.md
+    skills: [".cursor/skills/preflight-lab/"]
+
+  exposure_lifecycle:
+    trigger: "continua bitácora exposición, /kaanbal-exposure, matrix, MagicDNS, bindings, switch exposición"
+    read:
+      - SOFTWARE_FACTORY/docs/EXPOSURE_LIFECYCLE_BITACORA.md
+      - SOFTWARE_FACTORY/handoff/CURRENT_STATE.md
+      - SOFTWARE_FACTORY/docs/INSTALLER_KNOWN_ISSUES.md
+    skills:
+      - ".cursor/skills/exposure-lifecycle/"
+      - ".cursor/skills/lab-e2e-exposure/"
+    rules: [".cursor/rules/17-exposure-lifecycle.mdc"]
+
+external:
+  miro:
+    board_url: https://miro.com/app/board/uXjVH3hIUGE=/
+    use_for: [fases, arquitectura visual, workshops]
+  jira:
+    board_url: https://asistenteia97.atlassian.net/jira/software/projects/SF/boards/1
+    use_for: [backlog, estado, evidencia de entrega]
+  confluence:
+    space_key: SoftwareFa
+    space_id: "524291"
+    homepage_id: "524383"
+    url: https://asistenteia97.atlassian.net/wiki/spaces/SoftwareFa/overview
+    use_for: [guias usuario, bitacora entregas, indice OSS]
+    contract: docs/contracts/CONFLUENCE_DOCS_CONTRACT.md
+    skill: .cursor/skills/documentador-confluence/
+
+decisions_pending:
+  - id: ADR-001
+    topic: organizacion github canonica del instalador vs POC
+    file: docs/adr/001-organizacion-github.md

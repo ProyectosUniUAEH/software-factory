@@ -16,5 +16,5 @@ patchesStrategicMerge:
 
 images:
   - name: kaanbal-api-image
-    newName: andresupmh/kaanbal-api
+    newName: DOCKERHUB_USER/kaanbal-api
     newTag: latest

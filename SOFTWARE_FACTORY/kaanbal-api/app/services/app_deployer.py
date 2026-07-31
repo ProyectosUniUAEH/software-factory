@@ -33,6 +33,8 @@ from app.defaults import (
     TAILSCALE_DNS_SUFFIX,
     TAILSCALE_API_BASE,
     TAILSCALE_OAUTH_URL,
+    INGRESS_CLASS,
+    INGRESS_CLUSTER_ISSUER,
 )
 
 logger = logging.getLogger(__name__)
@@ -61,24 +63,42 @@ from app.services.template_service import TemplateService
 from app.services.template_spec import TemplateSpec
 from app.services.git_provider import GitProvider, get_git_provider, build_provider_from_config
 
-# Protocol → nginx ingress annotations mapping
+# Protocol → Ingress annotations. Dual nginx+traefik so either controller works
+# (lab/core use Traefik; older templates still mention nginx class names).
 _PROTOCOL_NGINX_ANNOTATIONS = {
     "websocket": {
         "nginx.ingress.kubernetes.io/proxy-http-version": "1.1",
         "nginx.ingress.kubernetes.io/proxy-read-timeout": "86400",
         "nginx.ingress.kubernetes.io/proxy-send-timeout": "86400",
+        "traefik.ingress.kubernetes.io/service.sticky.cookie": "true",
+        "traefik.ingress.kubernetes.io/router.middlewares": "",  # placeholder; timeouts via entrypoints
     },
     "sse": {
         "nginx.ingress.kubernetes.io/proxy-buffering": "off",
         "nginx.ingress.kubernetes.io/proxy-read-timeout": "3600",
         "nginx.ingress.kubernetes.io/proxy-send-timeout": "3600",
+        "traefik.ingress.kubernetes.io/service.sticky.cookie": "true",
     },
     "grpc": {
         "nginx.ingress.kubernetes.io/backend-protocol": "GRPC",
+        "traefik.ingress.kubernetes.io/service.serversscheme": "h2c",
     },
     "mqtt": {
         "nginx.ingress.kubernetes.io/proxy-read-timeout": "86400",
         "nginx.ingress.kubernetes.io/proxy-send-timeout": "86400",
+    },
+}
+
+# Prefer Traefik keys when generating fresh ingresses (lab default).
+_PROTOCOL_TRAEFIK_ANNOTATIONS = {
+    "websocket": {
+        "traefik.ingress.kubernetes.io/service.sticky.cookie": "true",
+    },
+    "sse": {
+        "traefik.ingress.kubernetes.io/service.sticky.cookie": "true",
+    },
+    "grpc": {
+        "traefik.ingress.kubernetes.io/service.serversscheme": "h2c",
     },
 }
 
@@ -119,6 +139,10 @@ class AppDeployer:
                 "vault_hostname": config.get("vault_hostname", VAULT_HOSTNAME),
                 "elastic_ip": config.get("cluster_ssh_host", ""),
                 "ssh_key_path": config.get("ssh_key_path", ""),
+                # Ingress controller realmente instalado en el cluster
+                "ingress_class": config.get("ingress_class", INGRESS_CLASS),
+                "ingress_cluster_issuer": config.get(
+                    "ingress_cluster_issuer", INGRESS_CLUSTER_ISSUER),
                 # Git provider selection
                 "git_provider": config.get("git_provider", "bitbucket"),
                 # GitHub-specific
@@ -151,6 +175,8 @@ class AppDeployer:
                 "vault_hostname": VAULT_HOSTNAME,
                 "elastic_ip": "",
                 "ssh_key_path": "",
+                "ingress_class": INGRESS_CLASS,
+                "ingress_cluster_issuer": INGRESS_CLUSTER_ISSUER,
                 "git_provider": "bitbucket",
                 "github_org": "",
                 "github_token": "",
@@ -186,12 +212,70 @@ class AppDeployer:
     def domain(self):
         return self._credentials["domain"] if self._credentials else settings.domain
 
+    @property
+    def ingress_class(self):
+        """IngressClass real del cluster (k3s trae Traefik, no nginx)."""
+        if not self._credentials:
+            return INGRESS_CLASS
+        return self._credentials.get("ingress_class") or INGRESS_CLASS
+
+    @property
+    def ingress_cluster_issuer(self):
+        """ClusterIssuer de cert-manager, o "" si el TLS lo termina el edge."""
+        if not self._credentials:
+            return INGRESS_CLUSTER_ISSUER
+        return self._credentials.get("ingress_cluster_issuer") or ""
+
+    def _public_ingress_annotations(self, protocols=None):
+        """Anotaciones de un Ingress público según lo instalado en el cluster."""
+        annotations = {}
+        if self.ingress_cluster_issuer:
+            annotations["cert-manager.io/cluster-issuer"] = self.ingress_cluster_issuer
+        if protocols:
+            annotations.update(self._get_protocol_annotations(protocols))
+        return annotations
+
+    def _public_ingress_tls(self, hosts, secret_name):
+        """Bloque TLS solo si cert-manager va a emitir el certificado.
+
+        Detrás de Cloudflare Tunnel el certificado lo pone el edge y el túnel
+        entra por HTTP: pedir TLS aquí solo genera secrets que nadie rellena.
+        """
+        if not self.ingress_cluster_issuer:
+            return None
+        return [{"hosts": hosts, "secretName": secret_name}]
+
+    def _ingress_host_json6902_ops(self, host: str, tls_secret: str, indent: str = "    ") -> str:
+        """JSON6902 ops to set Ingress host; TLS ops only when cluster-issuer is set.
+
+        Base docker-hub Ingress omits spec.tls when INGRESS_CLUSTER_ISSUER is empty
+        (Cloudflare edge TLS). Unconditional replace on /spec/tls/0/hosts/0 then
+        breaks kustomize: 'doc is missing path: /spec/tls/0/hosts/0'.
+        """
+        ops = (
+            f"{indent}- op: replace\n"
+            f"{indent}  path: /spec/rules/0/host\n"
+            f"{indent}  value: {host}\n"
+        )
+        if self.ingress_cluster_issuer:
+            ops += (
+                f"{indent}- op: replace\n"
+                f"{indent}  path: /spec/tls/0/hosts/0\n"
+                f"{indent}  value: {host}\n"
+                f"{indent}- op: replace\n"
+                f"{indent}  path: /spec/tls/0/secretName\n"
+                f"{indent}  value: {tls_secret}\n"
+            )
+        return ops
+
     def _get_protocol_annotations(self, protocols: list) -> dict:
-        """Return merged nginx ingress annotations for the given real-time protocols."""
+        """Merged Ingress annotations for real-time protocols (nginx + Traefik keys)."""
         merged = {}
         for p in (protocols or []):
             merged.update(_PROTOCOL_NGINX_ANNOTATIONS.get(p, {}))
-        return merged
+            merged.update(_PROTOCOL_TRAEFIK_ANNOTATIONS.get(p, {}))
+        # Drop empty placeholder values
+        return {k: v for k, v in merged.items() if v != ""}
 
     def _is_root_domain_request(self, app_data: AppCreate) -> bool:
         cfg = getattr(app_data, "template_config", {}) or {}
@@ -214,12 +298,14 @@ class AppDeployer:
         return f"{env}-{app_name}.{self.domain}"
 
     def _build_public_host_tokenized(self, app_name: str, env: str, app_data: Optional[AppCreate] = None) -> str:
+        """Legacy token placeholder hostnames — use configured domain, not hardcoded domains."""
         use_root_domain = bool(app_data and self._is_root_domain_request(app_data))
+        domain = self.domain or "kaanbal.local"
         if env == "prod" and use_root_domain:
-            return "automation.com.mx"
+            return domain
         if env == "prod":
-            return f"{app_name}.automation.com.mx"
-        return f"{env}-{app_name}.automation.com.mx"
+            return f"{app_name}.{domain}"
+        return f"{env}-{app_name}.{domain}"
 
     def _sanitize_error(self, error_msg: str) -> str:
         """Strip credentials/tokens from error messages before exposing to users"""
@@ -464,9 +550,15 @@ class AppDeployer:
             await self._push_infra(infra_path, app_name, environments)
             await emit("infra_push", "Infrastructure updated (ArgoCD will sync)", "success")
 
-            # 7b. Create Cloudflare DNS record for public environments
+            # 7b. Create Cloudflare DNS via DnsPublisherService (retries, independent)
+            from app.services.exposure import DnsPublisherService, TailscalePublisherService
+
             has_public = any(
                 self._get_env_exposure(app_data, env) in ("public", "both")
+                for env in environments
+            )
+            has_ts = any(
+                self._get_env_exposure(app_data, env) in ("tailscale", "both")
                 for env in environments
             )
             if has_public:
@@ -475,16 +567,49 @@ class AppDeployer:
                     env_exposure = self._get_env_exposure(app_data, env)
                     if env_exposure in ("public", "both"):
                         public_fqdns.append(self._build_public_host(app_name, env, app_data))
-
-                # Deduplicate while preserving order.
                 public_fqdns = list(dict.fromkeys(public_fqdns))
 
                 await emit("dns", f"Creating DNS records ({len(public_fqdns)}): {', '.join(public_fqdns)}...")
-                dns_ok = await self._setup_cloudflare_dns(app_name, public_fqdns)
-                if dns_ok:
-                    await emit("dns", f"DNS records ready: {', '.join(public_fqdns)}", "success")
+
+                async def _create_all_dns(_hostname=None):
+                    return await self._setup_cloudflare_dns(app_name, public_fqdns)
+
+                dns_pub = DnsPublisherService()
+                # One publisher call covers the batch; create_fn ignores per-host arg.
+                dns_result = await dns_pub.publish(
+                    hostname=public_fqdns[0] if public_fqdns else app_name,
+                    domain=self.domain,
+                    ensure=True,
+                    create_fn=_create_all_dns,
+                )
+                if dns_result.ok:
+                    await emit(
+                        "dns",
+                        f"DNS records ready (attempts={dns_result.attempts}): {', '.join(public_fqdns)}",
+                        "success",
+                    )
+                elif dns_result.status == "pending":
+                    await emit("dns", f"DNS pending: {dns_result.detail}", "warning")
                 else:
                     await emit("dns", "Cloudflare not configured - create DNS record manually", "warning")
+
+            if has_ts:
+                ts_suffix = self._credentials.get("tailscale_dns_suffix", TAILSCALE_DNS_SUFFIX)
+                ts_pub = TailscalePublisherService()
+                for env in environments:
+                    if self._get_env_exposure(app_data, env) not in ("tailscale", "both"):
+                        continue
+                    magic = f"{env}-{app_name}.{ts_suffix}"
+                    await emit("tailscale", f"Waiting Tailscale device {magic}...")
+                    ts_result = await ts_pub.publish(magic_hostname=magic, ensure=True)
+                    level = "success" if ts_result.ok else (
+                        "warning" if ts_result.status == "pending" else "warning"
+                    )
+                    await emit(
+                        "tailscale",
+                        f"{magic}: {ts_result.detail} (attempts={ts_result.attempts})",
+                        level,
+                    )
             
             if app_data.creation_mode != CreationMode.CONFIG_ONLY:
                 # 8. Configure CI/CD variables (BEFORE enabling CI)
@@ -598,14 +723,50 @@ class AppDeployer:
                 if tailscale_tcp_ports and env_exposure in ("tailscale", "both"):
                     tcp_env_ports = {}
                     for tp in tailscale_tcp_ports:
-                        pname = tp.get("name", "tcp")
-                        pnum = tp.get("port")
+                        pname = tp.get("name", "tcp") if isinstance(tp, dict) else str(tp)
+                        pnum = tp.get("port") if isinstance(tp, dict) else None
                         tcp_env_ports[pname] = {
                             "port": pnum,
                             "tailscale_hostname": f"{env}-{app_name}-{pname}",
                             "tailscale_host": f"{env}-{app_name}-{pname}.{ts_dns_suffix}",
                         }
                     env_info["tailscale_tcp_ports"] = tcp_env_ports
+
+                # Fase 3: multi-surface URLs (editor/webhook/mcp/api/ws/dashboard)
+                try:
+                    from app.services.exposure.connection_surfaces import (
+                        build_env_surfaces, infer_surfaces,
+                    )
+                    public_host = self._build_public_host(app_name, env, app_data)
+                    cat = (getattr(app_data, "category", None) or
+                           (spec.category if spec else "") or "")
+                    tcp_list = []
+                    for tp in (tailscale_tcp_ports or []):
+                        if isinstance(tp, dict):
+                            tcp_list.append(tp)
+                        else:
+                            tcp_list.append({"name": str(tp)})
+                    surfaces = build_env_surfaces(
+                        mode=env_exposure,
+                        public_hostname=public_host,
+                        ts_hostname=ts_hostname or f"{env}-{app_name}",
+                        ts_suffix=ts_dns_suffix,
+                        app_name=app_name,
+                        env=env,
+                        category=cat,
+                        tcp_ports=tcp_list or None,
+                        surfaces=infer_surfaces(spec=spec, category=cat),
+                    )
+                    for key in (
+                        "editor_url", "webhook_url", "mcp_url", "api_url",
+                        "ws_url", "health_url", "dashboard_url", "surfaces",
+                        "public_url", "cluster_url", "status", "tcp",
+                    ):
+                        if key in surfaces:
+                            env_info[key] = surfaces[key]
+                except Exception as exc:
+                    logger.warning("connection surfaces failed for %s/%s: %s", app_name, env, exc)
+
                 connection_info["per_env_exposure"][env] = env_info
 
             # Include multi-port info from template catalog so the UI can display all ports
@@ -1184,12 +1345,13 @@ class AppDeployer:
             # For tailscale-only or internal web/API apps, remove the base nginx Ingress
             # (template overlays include a host-replace patch by default)
             if env_exposure in ("tailscale", "internal") and not is_tcp:
-                self._remove_nginx_ingress_for_tailscale_only(overlay_dest, app_name)
+                self._upsert_ingress_delete_patch(overlay_dest, "placeholder-app")
             # For public (non-prod) web/API apps, ensure the overlay has a proper
             # host-replace Ingress patch. Some templates ship with $patch:delete
             # in dev/staging overlays — convert it back to a host-replace patch.
             if env_exposure in ("public", "both") and not is_tcp:
                 self._ensure_nginx_ingress_for_public(overlay_dest, app_name, env, app_data)
+                self._upsert_ingress_host_patch(overlay_dest, app_name, env, app_data, "placeholder-app")
 
         # Aplicar reemplazos en todos los YAMLs
         for root, dirs, files in os.walk(dest_dir):
@@ -1348,6 +1510,14 @@ class AppDeployer:
             })
 
         # --- Build container spec ---
+        # Per-template resource defaults (n8n OOMs at 512Mi during migrations).
+        tpl_id = (template_details.get("id") or "").lower()
+        resources = template_details.get("resources") or {}
+        default_limits = {"cpu": "500m", "memory": "512Mi"}
+        default_requests = {"cpu": "100m", "memory": "256Mi"}
+        if tpl_id == "n8n" or template_details.get("category") == "workflow":
+            default_limits = {"cpu": "1000m", "memory": "2Gi"}
+            default_requests = {"cpu": "100m", "memory": "512Mi"}
         container = {
             "name": container_name,
             "image": docker_image,
@@ -1359,8 +1529,8 @@ class AppDeployer:
             }],
             "ports": container_ports,
             "resources": {
-                "requests": {"cpu": "100m", "memory": "256Mi"},
-                "limits": {"cpu": "500m", "memory": "512Mi"}
+                "requests": resources.get("requests") or default_requests,
+                "limits": resources.get("limits") or default_limits,
             }
         }
         if env_list:
@@ -1474,32 +1644,67 @@ class AppDeployer:
                 "ports": svc_ports
             }
         }
-        # Headless service for StatefulSets
+        # Headless service for StatefulSets (stable DNS for peers / PVC)
         if is_stateful:
             svc["spec"]["clusterIP"] = "None"
 
         with open(os.path.join(base_dir, "service.yaml"), 'w') as f:
             pyyaml.dump(svc, f, default_flow_style=False, sort_keys=False)
 
-        # --- Generate Ingress for HTTP services ---
-        is_tcp = template_details.get("is_tcp", False)
-        if not is_tcp and health_ep:
-            # This is an HTTP service — generate an Ingress
-            ingress_annotations = {
-                "cert-manager.io/cluster-issuer": "letsencrypt-prod"
+        # HTTP Ingress needs a ClusterIP backend — Traefik/nginx break on headless.
+        # For StatefulSet HTTP apps (n8n, etc.) expose a companion ClusterIP service.
+        service_type = (template_details.get("service_type") or "").lower()
+        category = (template_details.get("category") or "").lower()
+        is_tcp = bool(
+            template_details.get("is_tcp")
+            or service_type == "tcp"
+            or category in ("database", "cache", "queue")
+        )
+        wants_http = not is_tcp
+        http_svc_name = app_name
+        resources_list = [workload_file, "service.yaml"]
+
+        if is_stateful and wants_http:
+            http_svc_name = f"{app_name}-http"
+            http_svc = {
+                "apiVersion": "v1",
+                "kind": "Service",
+                "metadata": {
+                    "name": http_svc_name,
+                    "namespace": "prod",
+                    "labels": {"app": app_name, "kaanbal.io/role": "http-ingress"}
+                },
+                "spec": {
+                    "type": "ClusterIP",
+                    "selector": {"app": app_name},
+                    "ports": [{
+                        "port": main_port,
+                        "targetPort": main_port,
+                        "protocol": "TCP",
+                        "name": "http"
+                    }]
+                }
             }
-            # Inject protocol-specific nginx annotations
+            with open(os.path.join(base_dir, "service-http.yaml"), 'w') as f:
+                pyyaml.dump(http_svc, f, default_flow_style=False, sort_keys=False)
+            resources_list.append("service-http.yaml")
+
+        # --- Generate Ingress for HTTP services ---
+        # Previously required health_endpoint — that blocked n8n/emqx (no probe).
+        # Any non-TCP catalog service gets a base Ingress; overlays delete it when
+        # exposure is tailscale/internal.
+        if wants_http:
             app_protocols = getattr(app_data, "protocols", None) if app_data else None
             if not app_protocols:
                 app_protocols = []
 
-            # Add websocket protocol if enabled in template config
             template_config = getattr(app_data, "template_config", {}) or {} if app_data else {}
             if template_config.get("enable_websocket", False) and "websocket" not in app_protocols:
                 app_protocols = list(app_protocols or []) + ["websocket"]
 
-            if app_protocols:
-                ingress_annotations.update(self._get_protocol_annotations(app_protocols))
+            ingress_annotations = self._public_ingress_annotations(app_protocols)
+            ingress_tls = self._public_ingress_tls(
+                [f"{app_name}.{self.domain}"], f"tls-{app_name}")
 
             ingress = {
                 "apiVersion": "networking.k8s.io/v1",
@@ -1510,8 +1715,8 @@ class AppDeployer:
                     "annotations": ingress_annotations
                 },
                 "spec": {
-                    "ingressClassName": "nginx",
-                    "tls": [{"hosts": [f"{app_name}.{self.domain}"], "secretName": f"tls-{app_name}"}],
+                    "ingressClassName": self.ingress_class,
+                    **({"tls": ingress_tls} if ingress_tls else {}),
                     "rules": [{
                         "host": f"{app_name}.{self.domain}",
                         "http": {
@@ -1519,7 +1724,10 @@ class AppDeployer:
                                 "path": "/",
                                 "pathType": "Prefix",
                                 "backend": {
-                                    "service": {"name": app_name, "port": {"number": main_port}}
+                                    "service": {
+                                        "name": http_svc_name,
+                                        "port": {"number": main_port}
+                                    }
                                 }
                             }]
                         }
@@ -1528,16 +1736,13 @@ class AppDeployer:
             }
             with open(os.path.join(base_dir, "ingress.yaml"), 'w') as f:
                 pyyaml.dump(ingress, f, default_flow_style=False, sort_keys=False)
+            resources_list.append("ingress.yaml")
 
         # --- Generate kustomization.yaml ---
-        resources = [workload_file, "service.yaml"]
-        if not is_tcp and health_ep:
-            resources.append("ingress.yaml")
-
         kust = {
             "apiVersion": "kustomize.config.k8s.io/v1beta1",
             "kind": "Kustomization",
-            "resources": resources
+            "resources": resources_list
         }
         with open(os.path.join(base_dir, "kustomization.yaml"), 'w') as f:
             pyyaml.dump(kust, f, default_flow_style=False, sort_keys=False)
@@ -1577,6 +1782,8 @@ class AppDeployer:
                         f.write(content)
 
         # Generate Tailscale/Ingress exposure per env
+        public_paths = spec.public_paths if spec else []
+        private_env_vars = spec.private_env_vars if spec else []
         for env in environments:
             overlay_dest = os.path.join(overlays_dest, env)
             env_exposure = self._get_env_exposure(app_data, env)
@@ -1596,10 +1803,30 @@ class AppDeployer:
                     await self._generate_tailscale_tcp_services(overlay_dest, app_name, env, app_data, spec, tailscale_tcp_ports)
                 else:
                     await self._generate_tailscale_ingress(overlay_dest, app_name, env, app_data, spec)
+            # Mirror scaffold path: both + public_paths → path-restricted public Ingress
+            if env_exposure == "both" and public_paths and not is_tcp:
+                self._generate_webhook_ingress(overlay_dest, app_name, env, public_paths, app_data, spec)
             if env_exposure in ("tailscale", "internal") and not is_tcp:
-                self._remove_nginx_ingress_for_tailscale_only(overlay_dest, app_name)
+                # Prefer converting an existing host-replace patch; otherwise append delete.
+                self._upsert_ingress_delete_patch(overlay_dest, app_name)
             if env_exposure in ("public", "both") and not is_tcp:
                 self._ensure_nginx_ingress_for_public(overlay_dest, app_name, env, app_data)
+                self._upsert_ingress_host_patch(overlay_dest, app_name, env, app_data, app_name)
+
+        # Mirror scaffold: patch env domains for Tailscale / both private vars
+        base_dest = os.path.join(dest_dir, "base")
+        for env in environments:
+            overlay_dest = os.path.join(overlays_dest, env)
+            env_exposure = self._get_env_exposure(app_data, env)
+            if env_exposure == "tailscale":
+                self._patch_env_domains_for_exposure(
+                    overlay_dest, base_dest, app_name, env, "tailscale"
+                )
+            elif env_exposure == "both" and private_env_vars:
+                self._patch_env_domains_for_exposure(
+                    overlay_dest, base_dest, app_name, env, "both",
+                    private_env_vars=private_env_vars,
+                )
 
     def _scan_template_tailscale_ingresses(self, infra_path: str, app_name: str, environments: list) -> dict:
         """
@@ -1970,16 +2197,20 @@ spec:
 
     def _write_public_ingress_for_port(self, overlay_path: str, app_name: str, port_name: str,
                                        port_num: int, host: str, protocols: list[str]):
-        """Write an nginx Ingress for one exposed port. Idempotent."""
-        ann = {
-            "cert-manager.io/cluster-issuer": "letsencrypt-prod",
-            "nginx.ingress.kubernetes.io/ssl-redirect": "false",
-        }
+        """Write a public Ingress for one exposed port. Idempotent."""
+        ann = {"nginx.ingress.kubernetes.io/ssl-redirect": "false"}
+        if self.ingress_cluster_issuer:
+            ann["cert-manager.io/cluster-issuer"] = self.ingress_cluster_issuer
         ann.update(self._get_protocol_annotations(protocols))
         # backend-protocol: GRPC must only be present on grpc-like ports.
         if "grpc" not in (port_name or "").lower():
             ann.pop("nginx.ingress.kubernetes.io/backend-protocol", None)
         ann_lines = "".join(f'    {k}: "{v}"\n' for k, v in ann.items())
+
+        tls_yaml = ""
+        if self.ingress_cluster_issuer:
+            tls_yaml = (f"  tls:\n    - hosts:\n        - {host}\n"
+                        f"      secretName: tls-{app_name}-{port_name}\n")
 
         # FastAPI WebSocket templates expose /ws on the same container port as HTTP.
         # Keep the same public host and route only the websocket path through this ingress.
@@ -1996,12 +2227,8 @@ metadata:
     software-factory.io/port: "{port_name}"
   annotations:
 {ann_lines}spec:
-  ingressClassName: nginx
-  tls:
-    - hosts:
-        - {host}
-      secretName: tls-{app_name}-{port_name}
-  rules:
+  ingressClassName: {self.ingress_class}
+{tls_yaml}  rules:
     - host: {host}
       http:
         paths:
@@ -2135,6 +2362,20 @@ spec:
                 with open(kustomization_path, 'w') as f:
                     f.write(content)
 
+    # Regex for an Ingress target+patch block. Tolerates blank lines inside
+    # the patch body (some templates / serializers insert empty lines).
+    _INGRESS_PATCH_RE = re.compile(
+        r'^([ ]*)(?:#[^\n]*\n\s*)?- target:\s*\n'
+        r'(?:[ \t]*\n)*'
+        r'\s+kind:\s*Ingress\s*\n'
+        r'(?:[ \t]*\n)*'
+        r'\s+name:\s*([\w-]+)\s*\n'
+        r'(?:[ \t]*\n)*'
+        r'\s+patch:\s*\|-\s*\n'
+        r'((?:[ \t]*\n|[ \t]+.*\n)*)',
+        re.MULTILINE,
+    )
+
     def _remove_nginx_ingress_for_tailscale_only(self, overlay_path: str, app_name: str):
         """For tailscale-only web/API apps: replace nginx Ingress host-replace
         patch with $patch:delete so the base Ingress is completely removed.
@@ -2153,17 +2394,7 @@ spec:
         with open(kust_path, 'r') as f:
             content = f.read()
 
-        # Match the Ingress target+patch block (handles any indent / app name)
-        pattern = re.compile(
-            r'^([ ]*)- target:\s*\n'        # "- target:" with captured indent
-            r'\s+kind:\s*Ingress\s*\n'       # kind: Ingress
-            r'\s+name:\s*([\w-]+)\s*\n'      # name: <name>
-            r'\s+patch:\s*\|-\s*\n'          # patch: |-
-            r'(?:[ \t]+.*\n)*',              # patch body (indented lines)
-            re.MULTILINE
-        )
-
-        match = pattern.search(content)
+        match = self._INGRESS_PATCH_RE.search(content)
         if not match:
             logger.debug(f"No Ingress patch found in {kust_path} — skipping tailscale-only conversion")
             return
@@ -2190,6 +2421,76 @@ spec:
             f.write(content)
         logger.info(f"Converted Ingress patch to $patch:delete in {kust_path} (tailscale-only)")
 
+    def _append_ingress_kustomize_block(self, overlay_path: str, block: str):
+        """Append an Ingress patch block to kustomization.yaml (creates patches: if missing)."""
+        kust_path = os.path.join(overlay_path, "kustomization.yaml")
+        if not os.path.exists(kust_path):
+            return
+        with open(kust_path, 'r') as f:
+            content = f.read()
+        if "patches:" in content:
+            content = content.rstrip() + "\n" + block
+        else:
+            content = content.rstrip() + "\n\npatches:\n" + block
+        with open(kust_path, 'w') as f:
+            f.write(content)
+
+    def _upsert_ingress_delete_patch(self, overlay_path: str, ingress_name: str = "placeholder-app"):
+        """Ensure overlay deletes the base nginx Ingress (tailscale/internal only)."""
+        kust_path = os.path.join(overlay_path, "kustomization.yaml")
+        if not os.path.exists(kust_path):
+            return
+        with open(kust_path, 'r') as f:
+            content = f.read()
+        if self._INGRESS_PATCH_RE.search(content):
+            self._remove_nginx_ingress_for_tailscale_only(overlay_path, ingress_name)
+            return
+        block = (
+            f"  # Tailscale-only — remove base nginx Ingress to avoid host conflicts\n"
+            f"  - target:\n"
+            f"      kind: Ingress\n"
+            f"      name: {ingress_name}\n"
+            f"    patch: |-\n"
+            f"      $patch: delete\n"
+            f"      apiVersion: networking.k8s.io/v1\n"
+            f"      kind: Ingress\n"
+            f"      metadata:\n"
+            f"        name: {ingress_name}\n"
+        )
+        self._append_ingress_kustomize_block(overlay_path, block)
+        logger.info(f"Appended Ingress $patch:delete in {kust_path}")
+
+    def _upsert_ingress_host_patch(self, overlay_path: str, app_name: str, env: str,
+                                   app_data: Optional[AppCreate] = None,
+                                   ingress_name: str = "placeholder-app"):
+        """Ensure overlay patches Ingress host for public/both exposure."""
+        kust_path = os.path.join(overlay_path, "kustomization.yaml")
+        if not os.path.exists(kust_path):
+            return
+        with open(kust_path, 'r') as f:
+            content = f.read()
+        match = self._INGRESS_PATCH_RE.search(content)
+        host = self._build_public_host_tokenized(app_name, env, app_data)
+        tls_suffix = "root" if (app_data and self._is_root_domain_request(app_data) and env == "prod") else (
+            app_name if env == "prod" else f"{env}-{app_name}"
+        )
+        if match:
+            patch_body = match.group(3) or ""
+            if "$patch: delete" in patch_body or "$patch:delete" in patch_body:
+                # Convert delete → host-replace (public exposure on a tailscale-default overlay)
+                self._ensure_nginx_ingress_for_public(overlay_path, app_name, env, app_data)
+            # Already has an Ingress patch (host-replace or freshly converted)
+            return
+        block = (
+            f"  - target:\n"
+            f"      kind: Ingress\n"
+            f"      name: {ingress_name}\n"
+            f"    patch: |-\n"
+            f"{self._ingress_host_json6902_ops(host, f'tls-{tls_suffix}', indent='      ')}"
+        )
+        self._append_ingress_kustomize_block(overlay_path, block)
+        logger.info(f"Appended Ingress host patch ({host}) in {kust_path}")
+
     def _ensure_nginx_ingress_for_public(self, overlay_path: str, app_name: str, env: str, app_data: Optional[AppCreate] = None):
         """For public web/API apps: ensure the overlay has a proper host-replace
         Ingress patch. Some templates ship with $patch:delete in non-prod overlays
@@ -2206,24 +2507,13 @@ spec:
         with open(kust_path, 'r') as f:
             content = f.read()
 
-        # Only act if we find a $patch: delete targeting an Ingress
-        pattern = re.compile(
-            r'^([ ]*)(?:#[^\n]*\n\s*)?- target:\s*\n'  # "- target:" with optional comment
-            r'\s+kind:\s*Ingress\s*\n'                   # kind: Ingress
-            r'\s+name:\s*([\w-]+)\s*\n'                  # name: <name>
-            r'\s+patch:\s*\|-\s*\n'                      # patch: |-
-            r'((?:[ \t]+.*\n)*)',                         # patch body
-            re.MULTILINE
-        )
-
-        match = pattern.search(content)
+        match = self._INGRESS_PATCH_RE.search(content)
         if not match:
             return
 
-        patch_body = match.group(3)
+        patch_body = match.group(3) or ""
         if "$patch: delete" not in patch_body and "$patch:delete" not in patch_body:
-            # Already a host-replace patch — nothing to do (root-domain fixup
-            # happens after global replacements in _setup_infra)
+            # Already a host-replace patch — nothing to do
             return
 
         indent = match.group(1)
@@ -2233,21 +2523,14 @@ spec:
         use_root_domain = bool(app_data and self._is_root_domain_request(app_data) and env == "prod")
         tls_suffix = "root" if use_root_domain else (app_name if env == "prod" else f"{env}-{app_name}")
 
-        # Replace $patch:delete with a proper host-replace JSON patch
+        # Replace entire $patch:delete block with a clean JSON6902 host-replace
+        # (never leave leftover lines — that breaks kustomize PatchTransformer).
         replacement = (
             f"{indent}- target:\n"
             f"{indent}    kind: Ingress\n"
             f"{indent}    name: {name}\n"
             f"{indent}  patch: |-\n"
-            f"{indent}    - op: replace\n"
-            f"{indent}      path: /spec/rules/0/host\n"
-            f"{indent}      value: {host_tokenized}\n"
-            f"{indent}    - op: replace\n"
-            f"{indent}      path: /spec/tls/0/hosts/0\n"
-            f"{indent}      value: {host_tokenized}\n"
-            f"{indent}    - op: replace\n"
-            f"{indent}      path: /spec/tls/0/secretName\n"
-            f"{indent}      value: tls-{tls_suffix}\n"
+            f"{self._ingress_host_json6902_ops(host_tokenized, f'tls-{tls_suffix}', indent=indent + '    ')}"
         )
 
         content = content[:match.start()] + replacement + content[match.end():]
@@ -2310,6 +2593,13 @@ spec:
             for k, v in self._get_protocol_annotations(app_protocols).items():
                 proto_ann_yaml += f'    {k}: "{v}"\n'
 
+        issuer_ann = ""
+        webhook_tls = ""
+        if self.ingress_cluster_issuer:
+            issuer_ann = f'    cert-manager.io/cluster-issuer: "{self.ingress_cluster_issuer}"\n'
+            webhook_tls = (f"  tls:\n  - hosts:\n    - {host}\n"
+                           f"    secretName: tls-{env}-{app_name}-webhook\n")
+
         ingress_yaml = f"""# Public webhook/API ingress - generated by Kaanbal Engine
 # Only exposes specific paths publicly. Full UI access via Tailscale VPN.
 apiVersion: networking.k8s.io/v1
@@ -2320,19 +2610,14 @@ metadata:
     app: {app_name}
     software-factory.io/exposure: public-paths
   annotations:
-    cert-manager.io/cluster-issuer: "letsencrypt-prod"
-    nginx.ingress.kubernetes.io/ssl-redirect: "false"
+{issuer_ann}    nginx.ingress.kubernetes.io/ssl-redirect: "false"
     nginx.ingress.kubernetes.io/proxy-body-size: "100m"
     nginx.ingress.kubernetes.io/proxy-read-timeout: "3600"
     nginx.ingress.kubernetes.io/proxy-send-timeout: "3600"
 {proto_ann_yaml}
 spec:
-  ingressClassName: nginx
-  tls:
-  - hosts:
-    - {host}
-    secretName: tls-{env}-{app_name}-webhook
-  rules:
+  ingressClassName: {self.ingress_class}
+{webhook_tls}  rules:
   - host: {host}
     http:
       paths:
@@ -2751,6 +3036,26 @@ spec:
                         continue
                     env_vars[f"{alias}_{key}"] = str(val)
 
+                # n8n (and similar) expect DB_TYPE + DB_POSTGRESDB_* — not only DB_HOST.
+                consumer_tpl = (getattr(app_data, "template", None) or "").lower()
+                if template_id == "postgres" and (
+                    "n8n" in consumer_tpl or consumer_tpl.endswith("n8n")
+                ):
+                    env_vars["DB_TYPE"] = "postgresdb"
+                    if conn.get("HOST"):
+                        env_vars["DB_POSTGRESDB_HOST"] = str(conn["HOST"])
+                    if conn.get("PORT"):
+                        env_vars["DB_POSTGRESDB_PORT"] = str(conn["PORT"])
+                    if conn.get("DATABASE"):
+                        env_vars["DB_POSTGRESDB_DATABASE"] = str(conn["DATABASE"])
+                    if conn.get("USER"):
+                        env_vars["DB_POSTGRESDB_USER"] = str(conn["USER"])
+                    if conn.get("PASSWORD"):
+                        env_vars["DB_POSTGRESDB_PASSWORD"] = str(conn["PASSWORD"])
+                    env_vars["DB_POSTGRESDB_SSL_ENABLED"] = "false"
+                    env_vars.setdefault("N8N_LISTEN_ADDRESS", "0.0.0.0")
+                    env_vars.setdefault("NODE_OPTIONS", "--max-old-space-size=1024")
+
                 if emit:
                     await emit(
                         "db_bindings",
@@ -2913,61 +3218,42 @@ images:
 """
 
         ingress_patch = ""
-        if not is_config_only:
-            env_exposure = self._get_env_exposure(app_data, env) if app_data else "public"
-            if env == "prod":
-                # Prod: patch the base nginx Ingress with the correct host
-                ingress_patch = f"""
+        # Scaffold AND config-only HTTP apps need ingress host/delete patches.
+        # Config-only docker-hub manifests now ship a base Ingress for non-TCP.
+        env_exposure = self._get_env_exposure(app_data, env) if app_data else "public"
+        needs_ingress_patch = True
+        if is_config_only and app_data and getattr(app_data, "category", None) in (
+            "database", "cache", "queue"
+        ):
+            needs_ingress_patch = False
+        if needs_ingress_patch:
+            if env == "prod" or env_exposure in ("public", "both"):
+                # Keep/patch the base nginx Ingress with the correct host
+                if env_exposure not in ("tailscale", "internal"):
+                    host_value = f"{subdomain}.{self.domain}"
+                    ingress_patch = (
+                        f"\n- target:\n"
+                        f"    kind: Ingress\n"
+                        f"    name: {app_name}\n"
+                        f"  patch: |-\n"
+                        f"{self._ingress_host_json6902_ops(host_value, f'tls-{subdomain}', indent='    ')}"
+                    )
+                else:
+                    ingress_patch = f"""
+# {env.capitalize()} uses Tailscale only — remove base nginx Ingress to avoid host conflicts
 - target:
     kind: Ingress
     name: {app_name}
   patch: |-
-    - op: replace
-      path: /spec/rules/0/host
-      value: {subdomain}.{self.domain}
-    - op: replace
-      path: /spec/tls/0/hosts/0
-      value: {subdomain}.{self.domain}
-    - op: replace
-      path: /spec/tls/0/secretName
-      value: tls-{subdomain}"""
-            elif env_exposure == "both":
-                # Both: keep the nginx Ingress with env-prefixed host + Tailscale Ingress added separately
-                ingress_patch = f"""
-- target:
+    $patch: delete
+    apiVersion: networking.k8s.io/v1
     kind: Ingress
-    name: {app_name}
-  patch: |-
-    - op: replace
-      path: /spec/rules/0/host
-      value: {subdomain}.{self.domain}
-    - op: replace
-      path: /spec/tls/0/hosts/0
-      value: {subdomain}.{self.domain}
-    - op: replace
-      path: /spec/tls/0/secretName
-      value: tls-{subdomain}"""
-            elif env_exposure == "public":
-                # Public only (no Tailscale): keep the nginx Ingress with env-prefixed host
-                ingress_patch = f"""
-- target:
-    kind: Ingress
-    name: {app_name}
-  patch: |-
-    - op: replace
-      path: /spec/rules/0/host
-      value: {subdomain}.{self.domain}
-    - op: replace
-      path: /spec/tls/0/hosts/0
-      value: {subdomain}.{self.domain}
-    - op: replace
-      path: /spec/tls/0/secretName
-      value: tls-{subdomain}"""
+    metadata:
+      name: {app_name}"""
             else:
-                # Tailscale-only: remove the base nginx Ingress
-                # (nginx rejects duplicate host/path across namespaces)
+                # Tailscale-only / internal: remove the base nginx Ingress
                 ingress_patch = f"""
-# {env.capitalize()} uses Tailscale only \u2014 remove base nginx Ingress to avoid host conflicts
+# {env.capitalize()} uses Tailscale only — remove base nginx Ingress to avoid host conflicts
 - target:
     kind: Ingress
     name: {app_name}
@@ -3033,6 +3319,13 @@ patches:
             )
             if result.returncode != 0:
                 err = (result.stderr or result.stdout or "unknown error").strip()
+                # Prefer the real Error: line over deprecation warnings
+                error_lines = [
+                    ln for ln in err.splitlines()
+                    if ln.strip().startswith("Error:")
+                ]
+                if error_lines:
+                    err = " | ".join(error_lines)
                 raise Exception(
                     f"Generated manifests invalid for {app_name}/{env}: "
                     f"{self._sanitize_error(err)}"
@@ -3196,7 +3489,62 @@ patches:
         except Exception as e:
             logger.error(f"Cloudflare DNS setup failed: {e}")
             return False
-    
+
+    async def _delete_cloudflare_dns(self, fqdns: Optional[list[str]] = None) -> bool:
+        """Delete Cloudflare CNAME records for public hosts (idempotent).
+
+        Used when switching an env away from public/both. Does not touch
+        wildcard records. Returns True if deleted or already absent.
+        """
+        cf_token = self._credentials.get("cloudflare_token", "")
+        cf_account = self._credentials.get("cloudflare_account_id", "")
+        cf_zone_id = self._credentials.get("cloudflare_zone_id", "")
+        if not cf_token or not cf_account:
+            logger.warning("Cloudflare not configured - skipping DNS delete")
+            return False
+        records = [r for r in (fqdns or []) if r]
+        if not records:
+            return True
+
+        cf_api = "https://api.cloudflare.com/client/v4"
+        headers = {
+            "Authorization": f"Bearer {cf_token}",
+            "Content-Type": "application/json",
+        }
+        try:
+            async with httpx.AsyncClient(timeout=30) as client:
+                if not cf_zone_id:
+                    zone_resp = await client.get(
+                        f"{cf_api}/zones?name={self.domain}&status=active",
+                        headers=headers,
+                    )
+                    zones = zone_resp.json().get("result", [])
+                    if not zones:
+                        return False
+                    cf_zone_id = zones[0]["id"]
+
+                for fqdn in records:
+                    existing_resp = await client.get(
+                        f"{cf_api}/zones/{cf_zone_id}/dns_records?type=CNAME&name={fqdn}",
+                        headers=headers,
+                    )
+                    existing = existing_resp.json().get("result", [])
+                    for rec in existing:
+                        del_resp = await client.delete(
+                            f"{cf_api}/zones/{cf_zone_id}/dns_records/{rec['id']}",
+                            headers=headers,
+                        )
+                        if del_resp.status_code not in (200, 404):
+                            logger.warning(
+                                "CF DNS delete %s failed: %s", fqdn, del_resp.text[:200]
+                            )
+                        else:
+                            logger.info("Deleted Cloudflare DNS: %s", fqdn)
+                return True
+        except Exception as e:
+            logger.error(f"Cloudflare DNS delete failed: {e}")
+            return False
+
     async def _configure_ci_variables(self, app_name: str):
         """Configure CI/CD variables using the current git provider"""
         # Build INFRA_REPO_AUTH based on provider type

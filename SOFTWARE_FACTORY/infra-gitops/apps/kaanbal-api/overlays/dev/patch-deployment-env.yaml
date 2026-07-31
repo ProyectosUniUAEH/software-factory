@@ -19,7 +19,7 @@ spec:
         - name: GIT_PROVIDER
           value: "github"
         - name: BITBUCKET_WORKSPACE
-          value: "futurefarms-softwarefactory"
+          value: "ProyectosUniUAEH"
         - name: INFRA_REPO
           value: "infra-gitops"
         - name: SECRET_KEY

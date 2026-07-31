@@ -2,8 +2,12 @@
 
 ## Immediate Handoff Read (New Agent/New Chat)
 1. `handoff/START_HERE.md`
-2. `handoff/CURRENT_STATE.md`
-3. `handoff/FLOW_CONTRACT.md`
+2. `docs/EXPOSURE_LIFECYCLE_BITACORA.md` — **plan activo** (exposición / bindings / instalador)
+3. `.cursor/skills/exposure-lifecycle/SKILL.md` (repo padre `software-factory`)
+4. `handoff/CURRENT_STATE.md`
+5. `handoff/FLOW_CONTRACT.md`
+
+Retomar con: `continua bitácora exposición` o `/kaanbal-exposure`
 
 ## Project Overview
 Kaanbal Engine is a Kubernetes-native PaaS that lets developers deploy applications (frontend + backend + database) in minutes without deep K8s knowledge.

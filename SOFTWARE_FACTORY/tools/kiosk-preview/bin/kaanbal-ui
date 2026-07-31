@@ -1,0 +1,11 @@
+#!/usr/bin/env bash
+# Vuelve a la interfaz Kaanbal a pantalla completa (tty1).
+set -euo pipefail
+
+KIOSK_UNIT="${KAANBAL_KIOSK_UNIT:-kaanbal-kiosk-preview.service}"
+MODE_UNIT="${KAANBAL_MODE_UNIT:-kaanbal-mode-switch.service}"
+
+systemctl stop getty@tty1.service 2>/dev/null || true
+systemctl start "$MODE_UNIT"
+systemctl start "$KIOSK_UNIT"
+chvt 1

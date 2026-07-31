@@ -1,0 +1,14 @@
+---
+description: GitOps e infra-gitops — lecciones de kustomize/ingress
+globs: SOFTWARE_FACTORY/infra-gitops/**
+alwaysApply: false
+---
+
+# GitOps
+
+- Fuente de despliegue: `infra-gitops` → ArgoCD ApplicationSets.
+- Overlay `kustomization.yaml`: indentación `resources` con `  - ../../base`.
+- No usar `nginx.ingress.kubernetes.io/configuration-snippet` (bloqueado por admission).
+- No forzar GRPC backend en rutas no-GRPC.
+- Validar con `kubectl kustomize` antes de push.
+- Reemplazar hardcodes `futurefarms-*` por config de instalación (ADR-001).

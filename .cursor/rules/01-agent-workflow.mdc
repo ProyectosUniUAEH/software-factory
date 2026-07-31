@@ -1,0 +1,15 @@
+---
+description: Flujo de trabajo agente + Jira + evidencia en chat
+alwaysApply: true
+---
+
+# Flujo de trabajo
+
+1. Leer ticket Jira SF-XXX antes de codear.
+2. Usar skill `tarea-iniciar` → rama `SF-XXX-slug`.
+3. Commits: `SF-XXX tipo: resumen`.
+4. Al terminar: skill `tarea-cerrar` → PR + comentario Jira.
+5. **Pruebas manuales** → registrar en el chat con bloque PRUEBA (ver AGENTS.md).
+6. Un ticket, una rama, un PR.
+
+Subagentes: `explore` para mapa, `bugbot` para review, `shell` para lab, `ci-investigator` para CI roto.

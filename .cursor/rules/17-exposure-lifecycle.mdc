@@ -1,0 +1,18 @@
+---
+description: Ciclo de vida de exposición Kaanbal — bitácora y servicios independientes
+alwaysApply: true
+---
+
+# Exposure lifecycle
+
+Si el trabajo toca deploy, Ingress, Tailscale, DNS, bindings DB, switch de exposición o instalador:
+
+1. Leer `SOFTWARE_FACTORY/docs/EXPOSURE_LIFECYCLE_BITACORA.md`
+2. Seguir skill `.cursor/skills/exposure-lifecycle/SKILL.md`
+3. Implementar publishers como **servicios independientes con retry** (no lógica monolítica nueva en `app_deployer.py` sin extraer)
+4. Actualizar la bitácora al cerrar subtareas
+5. **Limpieza Tailscale obligatoria** en wipe/redeploy/lab reset:
+   `tools/cleanup-tailscale-orphans.py --apply` (órfanos) o `--wipe-all-tagged` (wipe total).
+   No dejar machines offline en login.tailscale.com/admin/machines.
+
+Frase usuario: `continua bitácora exposición` o `/kaanbal-exposure`

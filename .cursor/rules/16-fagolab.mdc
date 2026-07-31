@@ -1,0 +1,12 @@
+---
+description: FagoLab — app vertical, repo fago-sistema
+globs: ../fago-sistema/**
+alwaysApply: false
+---
+
+# FagoLab
+
+- Repo: `ProyectosUniUAEH/fago-sistema` (separado del monorepo producto).
+- Kaanbal gobierna despliegue; FagoLab conserva lógica científica.
+- `*.pem` debe estar en `.gitignore` — nunca en raíz del repo.
+- Health: `/health` 200, WebSocket 101 si habilitado.

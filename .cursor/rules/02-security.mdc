@@ -1,0 +1,13 @@
+---
+description: Seguridad — secretos, SSH, acceso lab
+alwaysApply: true
+---
+
+# Seguridad
+
+- Nunca commitear `.env`, `*.pem`, `*.key`, tokens.
+- No leer archivos `.env` ni `_private/` salvo `.env.example`.
+- No usar `root@` ni PEM compartido. Lab: `ssh andres-lan` con llave individual.
+- Agentes cloud: solo código, PR, docs — **sin SSH al lab**.
+- Comandos destructivos (`kubectl delete`, `rm -rf`, formateo) requieren aprobación explícita.
+- Rotar credenciales si hubo exposición (ver B4 en KAANBAL_IMPLEMENTATION_STATUS.md).

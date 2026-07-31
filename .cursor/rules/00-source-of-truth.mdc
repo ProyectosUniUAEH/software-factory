@@ -1,0 +1,15 @@
+---
+description: Fuente de verdad y carriles producto/académico
+alwaysApply: true
+---
+
+# Fuente de verdad
+
+- **Código y contratos técnicos** → Git (`software-factory`, repos generados)
+- **Trabajo y estado** → Jira proyecto SF (`asistenteia97.atlassian.net`)
+- **Narrativa académica** → repo privado `kaanbal-research`
+- **Diagramas visuales** → [Miro Kaanbal](https://miro.com/app/board/uXjVH3hIUGE=/)
+
+Lee `docs/CONTEXT_MAP.yaml` para saber qué documento cargar según el área.
+
+No duplicar ADRs en Confluence — enlazar.

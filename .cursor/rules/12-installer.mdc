@@ -1,0 +1,13 @@
+---
+description: Instalador web Kaanbal (Acuaponsito)
+globs: SOFTWARE_FACTORY/installer/**
+alwaysApply: false
+---
+
+# Instalador
+
+- Entry: `python3 installer/server.py` → puerto 3000, token de sesión.
+- Solo Python stdlib — sin pip en máquina destino.
+- Pasos idempotentes: detectar lo ya instalado.
+- Credenciales vienen del wizard / `.env` — nunca hardcodear en repo.
+- Perfil inicial lab: `lab-standard`.

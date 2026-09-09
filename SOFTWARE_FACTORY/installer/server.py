@@ -2564,7 +2564,11 @@ def _launch_agent_runtime():
             return "existente"
         # Runtime viejo con otro token (p. ej. tras reiniciar el instalador)
         raise RuntimeError("Puerto 4600 ocupado por otro runtime; no se cerró ningún proceso")
-    env = {**os.environ, "ACUA_TOKEN": TOKEN, "ACUA_HOST": "127.0.0.1"}
+    env = {
+        **os.environ,
+        "ACUA_TOKEN": TOKEN,
+        "ACUA_HOST": os.environ.get("ACUA_HOST", "127.0.0.1"),
+    }
     if ANIM_DIR:
         env["KAANBAL_ANIM_DIR"] = ANIM_DIR
     subprocess.Popen([sys.executable, runtime], env=env,

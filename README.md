@@ -24,9 +24,17 @@ Usa un SHA aprobado en lugar de `main` para repetir exactamente el código de un
 prueba. La versión de K3s y Argo usada por el instalador aún requiere fijación y
 validación integral; fijar el código no fija todas las dependencias externas.
 
-El usuario atiende sudo en su terminal y completa las credenciales en el navegador.
-No hace falta entregar contraseñas, archivos `.env` ni claves privadas al agente.
-El instalador se atiende por túnel SSH y escucha solamente en loopback.
+El usuario atiende sudo en su terminal. Al arrancar, el comando imprime una URL
+LAN con este formato:
+
+```text
+http://192.168.1.48:3000/?token=TOKEN_TEMPORAL
+```
+
+Copia esa URL en el navegador de una computadora conectada a la misma red y
+completa las credenciales. No hace falta entregar contraseñas, archivos `.env`
+ni claves privadas al agente. Para servidores sin una LAN confiable también se
+puede ejecutar el bootstrap con `--ssh-tunnel`.
 
 El perfil actual necesita GitHub y Docker Hub. Cloudflare y dominio corresponden
 al acceso público; Tailscale al privado. No se ha implementado el builder local

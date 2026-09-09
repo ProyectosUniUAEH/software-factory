@@ -48,7 +48,7 @@ Uso:
                    instalar realmente desde cero. Allowlist estricta por
                    nombre exacto: tus apps y sus repos NO se tocan.
 
-Copia .env.example para saber qué variable hace qué.
+Copia installer/config.example fuera del checkout para el modo desatendido.
 Sin --reset-remote no se elimina nada fuera de esta máquina.
 EOF
 }
@@ -78,7 +78,7 @@ fi
 
 if [[ "${EUID}" -ne 0 ]]; then
   command -v sudo >/dev/null || die "Ejecuta como root o instala sudo."
-  exec sudo --preserve-env=PATH bash "$0" "${ORIGINAL_ARGS[@]}"
+  exec sudo bash "$0" "${ORIGINAL_ARGS[@]}"
 fi
 
 [[ "$(uname -s)" == "Linux" ]] || die "Kaanbal requiere Linux."
@@ -95,6 +95,24 @@ for cmd in python3 curl git; do
     break
   fi
 done
+
+# Solo detenemos nuestra unidad; nunca procesos ajenos por su puerto.
+if ! $CHECK_ONLY; then
+if systemctl cat "$SERVICE" >/dev/null 2>&1; then
+  [[ "$(systemctl show "$SERVICE" --property=Description --value)" == "Kaanbal temporary privileged installer" ]] \
+    || die "Existe una unidad ${SERVICE} ajena; no se modifica."
+  systemctl stop "$SERVICE"
+fi
+python3 - <<'PYPORT'
+import socket
+for port in (3000, 4600, 8080):
+    with socket.socket() as sock:
+        try:
+            sock.bind(("127.0.0.1", port))
+        except OSError:
+            raise SystemExit(f"Puerto {port} ocupado. Libera el servicio responsable antes de reintentar; no se detuvo ningún proceso ajeno.")
+PYPORT
+fi
 
 # Las credenciales se importan ANTES de cualquier reset: el reset remoto las
 # necesita para autenticarse, y --wipe-credentials las borra al final.
@@ -115,6 +133,7 @@ if [[ -n "$ENV_SOURCE" ]]; then
     cat "$tmp" >"$CREDS_ENV"
     rm -f "$tmp"
   else
+    [[ ! -s "$CREDS_ENV" ]] || die "Ya existen credenciales en ${CREDS_ENV}. Inicia sin --env para conservarlas; no se sobrescriben."
     tr -d '\r' <"$ENV_SOURCE" >"$CREDS_ENV"
   fi
   chmod 600 "$CREDS_ENV"
@@ -179,6 +198,8 @@ TOKEN_HASH="$(printf '%s' "$TOKEN" | sha256sum | cut -c1-12)"
 cat >"$RUNTIME_ENV" <<EOF
 KAANBAL_INSTALLER_TOKEN=${TOKEN}
 KAANBAL_INSTALLER_PORT=3000
+KAANBAL_INSTALLER_HOST=127.0.0.1
+ACUA_HOST=127.0.0.1
 KAANBAL_INSTALLER_STATE_DIR=${STATE_DIR}
 KAANBAL_CREDENTIALS_FILE=${CREDS_ENV}
 KAANBAL_INSTALLER_PRIVILEGED=1
@@ -209,10 +230,17 @@ UMask=0077
 WantedBy=multi-user.target
 EOF
 
-# Elimina una ejecución manual antigua antes de entregar los puertos a systemd.
-fuser -k 3000/tcp 4600/tcp 2>/dev/null || true
 systemctl daemon-reload
 systemctl enable --now "$SERVICE"
+ready=false
+for attempt in {1..30}; do
+  if curl --fail --silent --max-time 2 http://127.0.0.1:3000/ >/dev/null; then
+    ready=true
+    break
+  fi
+  sleep 1
+done
+$ready || die "El instalador no respondió. Consulta sudo journalctl -u ${SERVICE} -n 50; no compartas tokens."
 
 if $UNATTENDED; then
   # El servicio ya está arriba; ahora se conduce la instalación por su API, que
@@ -221,9 +249,9 @@ if $UNATTENDED; then
     --env "$CREDS_ENV" --token "$TOKEN"
 fi
 
-IP="$(hostname -I 2>/dev/null | awk '{print $1}')"
-[[ -n "$IP" ]] || IP="127.0.0.1"
 ok "Bootstrap preparado: ${MEM_GB}GB RAM, ${CPUS} CPU, ${DISK_GB}GB libres"
 ok "Token temporal fingerprint: ${TOKEN_HASH}"
-printf '\nAbre el instalador:\n\n  http://%s:3000/?token=%s\n\n' "$IP" "$TOKEN"
+printf '\nEn otra terminal de tu PC, conserva abierto este túnel (sustituye el alias):\n\n'
+printf '  ssh -N -o ExitOnForwardFailure=yes -L 127.0.0.1:3000:127.0.0.1:3000 -L 127.0.0.1:4600:127.0.0.1:4600 -L 127.0.0.1:8080:127.0.0.1:8080 pam-lab\n'
+printf '\nAbre en el navegador de tu PC:\n\n  http://localhost:3000/?token=%s\n\n' "$TOKEN"
 printf 'El token se revoca y este servicio se deshabilita al confirmar el acceso final.\n'

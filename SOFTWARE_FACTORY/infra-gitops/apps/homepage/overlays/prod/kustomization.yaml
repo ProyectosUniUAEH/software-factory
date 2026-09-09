@@ -39,4 +39,4 @@ patches:
 secretGenerator:
   - name: homepage-secrets
     literals:
-      - APP_SECRET=a3vcMDSrkTN7w3qO33WqbZhw
+      - APP_SECRET=CHANGE_ME

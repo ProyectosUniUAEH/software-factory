@@ -38,11 +38,11 @@ patches:
 secretGenerator:
   - name: fago-api-secrets
     literals:
-      - SECRET_KEY=fG48uY94WoB1OvXqrVNG4DED
+      - SECRET_KEY=CHANGE_ME
       - MONGODB_URI=
       - FAGO_BD_POSTGRES_HOST=fago-bd-postgres.dev.svc.cluster.local
       - FAGO_BD_POSTGRES_PORT=5432
       - FAGO_BD_POSTGRES_DATABASE=fago_bd_postgres
       - FAGO_BD_POSTGRES_USER=devadmin
-      - FAGO_BD_POSTGRES_PASSWORD=NSdxDGAhkX4sl8hiXzLWaTxz
+      - FAGO_BD_POSTGRES_PASSWORD=CHANGE_ME
       - FAGO_BD_POSTGRES_URI=postgresql://devadmin:NSdxDGAhkX4sl8hiXzLWaTxz@fago-bd-postgres.dev.svc.cluster.local:5432/fago_bd_postgres

@@ -55,7 +55,7 @@ Resultado observado:
 - `kaanbal-api` compilo correctamente con el Python bundled de Codex.
 - `kaanbal-console` build local no pudo completarse por error/timeout leyendo `node_modules` desde OneDrive; se verificaron marcadores del componente y el pipeline remoto si genero imagen Docker.
 - Docker Hub confirma tags existentes:
-  - `andresbardaleswork/kaanbal-api:prod-1c84e25`
+  - repositorio `andresbardaleswork/kaanbal-api`, etiqueta `prod-1c84e25`
   - `andresbardaleswork/kaanbal-console:prod-168eca3`
 - El sitio publico `https://kaanbal-console.futurefarms.mx/` responde 200.
 - Pendiente de confirmar en cluster: el bundle publico seguia mostrando asset anterior durante la verificacion local; GitOps esta actualizado, pero no se pudo forzar sync por SSH.

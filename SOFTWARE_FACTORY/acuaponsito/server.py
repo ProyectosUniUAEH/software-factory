@@ -921,7 +921,7 @@ class Handler(BaseHTTPRequestHandler):
 def main():
     threading.Thread(target=life_loop, daemon=True).start()
     remember("runtime", "arranque", port=PORT)
-    server = ThreadingHTTPServer(("0.0.0.0", PORT), Handler)
+    server = ThreadingHTTPServer((os.environ.get("ACUA_HOST", "0.0.0.0"), PORT), Handler)
     cfg = load_config()
     print("=" * 64)
     print(f"  🌱 {cfg['name']} Agent Runtime")

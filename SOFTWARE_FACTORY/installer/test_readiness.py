@@ -77,6 +77,7 @@ class ReadinessTests(unittest.TestCase):
         self.assertIn('--lan) ACCESS_MODE="lan"', script)
         self.assertIn('KAANBAL_INSTALLER_HOST=${INSTALLER_HOST}', script)
         self.assertIn('http://%s:3000/?token=%s', script)
+        self.assertIn('"http://${PROBE_HOST}:3000/"', script)
         self.assertNotIn('KAANBAL_INSTALLER_HOST=0.0.0.0', script)
 
     def post(self, path, payload):

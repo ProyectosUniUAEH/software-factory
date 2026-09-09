@@ -4,13 +4,16 @@ set -Eeuo pipefail
 REPO="https://github.com/ProyectosUniUAEH/software-factory.git"
 REVISION="main"
 DESTINATION="${HOME}/kaanbal-source"
+INSTALL_MODE="--lan"
 die() { printf '[kaanbal] ERROR: %s\n' "$*" >&2; exit 1; }
 while (($#)); do
   case "$1" in
     --ref) shift; (($#)) || die '--ref necesita una revisión'; REVISION="$1" ;;
     --dir) shift; (($#)) || die '--dir necesita una ruta'; DESTINATION="$1" ;;
+    --lan) INSTALL_MODE="--lan" ;;
+    --ssh-tunnel) INSTALL_MODE="--ssh-tunnel" ;;
     -h|--help)
-      printf 'Uso: bash install.sh [--ref commit|tag|branch] [--dir directorio-nuevo]\n'
+      printf 'Uso: bash install.sh [--ref commit|tag|branch] [--dir directorio-nuevo] [--lan|--ssh-tunnel]\n'
       printf 'Reanudar: sudo bash <directorio>/SOFTWARE_FACTORY/install.sh\n'
       exit 0 ;;
     *) die "Opción desconocida: $1" ;;
@@ -42,4 +45,4 @@ git -C "$DESTINATION" checkout --quiet --detach FETCH_HEAD
 printf '[kaanbal] Revisión descargada: '
 git -C "$DESTINATION" rev-parse HEAD
 [[ -f "$DESTINATION/SOFTWARE_FACTORY/install.sh" ]] || die 'Esta revisión no contiene el instalador.'
-as_root bash "$DESTINATION/SOFTWARE_FACTORY/install.sh"
+as_root bash "$DESTINATION/SOFTWARE_FACTORY/install.sh" "$INSTALL_MODE"

@@ -59,7 +59,7 @@ distintas: sudo puede pedir la contraseña de Ubuntu aunque SSH use una clave.
 El repositorio y la revisión deben ser públicos. Dentro de `ssh pam-lab`:
 
 ```bash
-( set -e; if ! command -v curl >/dev/null; then sudo apt-get update; sudo apt-get install -y curl ca-certificates; fi; revision=main; script=$(mktemp); trap 'rm -f "$script"' EXIT; curl --fail --show-error --location "https://raw.githubusercontent.com/ProyectosUniUAEH/software-factory/${revision}/install.sh" --output "$script"; bash "$script" --ref "$revision" )
+( set -e; if ! command -v curl >/dev/null; then sudo apt-get update; sudo apt-get install -y curl ca-certificates; fi; revision=main; script=$(mktemp); trap 'rm -f "$script"' EXIT; curl --fail --show-error --location "https://raw.githubusercontent.com/ProyectosUniUAEH/software-factory/${revision}/install.sh" --output "$script"; bash "$script" --ref "$revision" --lan )
 ```
 
 Para reproducir la prueba, reemplaza `main` por el SHA completo aprobado al
@@ -80,6 +80,14 @@ descarga parcial se conserva para revisar; `--dir` permite elegir otra ruta
 nueva. Las credenciales existentes no se sobrescriben con otro archivo.
 
 ## 4. Abrir el navegador y completar credenciales
+
+El modo `--lan` imprime una URL como
+`http://192.168.1.48:3000/?token=...`. Cópiala en el navegador de una PC de la
+misma red. No compartas la URL: el token permite controlar el instalador hasta
+que confirmas el acceso y el servicio temporal se apaga.
+
+Si la red local no es de confianza, inicia con `--ssh-tunnel`. En ese modo,
+desde otra terminal PowerShell conserva abierto:
 
 Desde otra terminal PowerShell de la PC, conserva abierto:
 

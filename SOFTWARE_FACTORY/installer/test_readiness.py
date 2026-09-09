@@ -72,6 +72,13 @@ class VaultTests(unittest.TestCase):
 
 
 class ReadinessTests(unittest.TestCase):
+    def test_shell_exposes_lan_only_when_explicit(self):
+        script = (Path(__file__).parents[1] / "install.sh").read_text(encoding="utf-8")
+        self.assertIn('--lan) ACCESS_MODE="lan"', script)
+        self.assertIn('KAANBAL_INSTALLER_HOST=${INSTALLER_HOST}', script)
+        self.assertIn('http://%s:3000/?token=%s', script)
+        self.assertNotIn('KAANBAL_INSTALLER_HOST=0.0.0.0', script)
+
     def post(self, path, payload):
         handler = object.__new__(server.Handler)
         handler.path = path

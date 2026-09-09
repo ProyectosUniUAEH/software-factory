@@ -14,13 +14,24 @@ el reinicio y la recuperación deben verificarse antes de declararla lista.
 Desde `SOFTWARE_FACTORY`:
 
 ```bash
-sudo bash ./install.sh
+sudo bash ./install.sh --lan
+```
+
+El modo LAN imprime una URL como
+`http://192.168.1.48:3000/?token=...`, lista para copiar al navegador desde una
+PC de la misma red. El token controla el instalador mientras está activo: no
+compartas la URL ni la abras desde una red que no sea de confianza.
+
+Para mantener los puertos únicamente en el servidor usa:
+
+```bash
+sudo bash ./install.sh --ssh-tunnel
 ```
 
 Sudo solicita la contraseña de Ubuntu al humano si corresponde. No se requiere
 NOPASSWD. El servicio continúa aunque se cierre la sesión SSH.
 
-Desde otra terminal de tu PC:
+En modo `--ssh-tunnel`, desde otra terminal de tu PC:
 
 ```bash
 ssh -N -o ExitOnForwardFailure=yes -L 127.0.0.1:3000:127.0.0.1:3000 -L 127.0.0.1:4600:127.0.0.1:4600 -L 127.0.0.1:8080:127.0.0.1:8080 pam-lab

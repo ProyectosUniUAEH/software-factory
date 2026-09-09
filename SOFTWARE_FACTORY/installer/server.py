@@ -2170,7 +2170,8 @@ def do_install(cfg):
             password = base64.b64decode(pwd.strip()).decode()
         if PORT_FORWARD_PROC is None or PORT_FORWARD_PROC.poll() is not None:
             PORT_FORWARD_PROC = subprocess.Popen(
-                "k3s kubectl -n argocd port-forward svc/argocd-server 8080:443 --address 127.0.0.1",
+                "k3s kubectl -n argocd port-forward svc/argocd-server 8080:443 "
+                f"--address {os.environ.get('KAANBAL_ARGO_FORWARD_ADDRESS', '127.0.0.1')}",
                 shell=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
             time.sleep(2)
         rc, node = kubectl("get node --no-headers")

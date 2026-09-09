@@ -14,6 +14,7 @@ PRESERVE="credentials"
 ENV_SOURCE=""
 UNATTENDED=false
 CHECK_ONLY=false
+ACCESS_MODE="ssh-tunnel"
 ORIGINAL_ARGS=("$@")
 
 log() { printf '\033[1;36m[kaanbal]\033[0m %s\n' "$*"; }
@@ -24,7 +25,8 @@ die() { printf '\033[1;31m  ERROR\033[0m %s\n' "$*" >&2; exit 1; }
 usage() {
   cat <<'EOF'
 Uso:
-  sudo bash ./install.sh                                   # asistente web
+  sudo bash ./install.sh --lan                             # URL directa en la red local
+  sudo bash ./install.sh --ssh-tunnel                      # acceso mediante túnel SSH
   sudo bash ./install.sh --env /ruta/a/.env                # asistente precargado
   sudo bash ./install.sh --unattended --env /ruta/a/.env   # sin navegador
   sudo bash ./install.sh --check --env /ruta/a/.env        # solo validar
@@ -39,6 +41,10 @@ Uso:
   --unattended     Instala de principio a fin leyendo el .env, sin abrir el
                    asistente. Valida todas las credenciales ANTES de tocar la
                    máquina y verifica las URLs al terminar.
+  --lan            Escucha sólo en la IP LAN detectada y devuelve una URL con
+                   token para copiar al navegador. Expone temporalmente 3000,
+                   4600 y el acceso provisional 8080 dentro de esa red.
+  --ssh-tunnel     Escucha en loopback; requiere redirección de puertos por SSH.
   --check          Solo valida el .env contra cada proveedor y sale. No instala
                    ni borra nada.
   --reset-local    Elimina k3s y los servicios Kaanbal de esta máquina.
@@ -59,6 +65,8 @@ while (($#)); do
     --reset-remote) RESET_REMOTE=true ;;
     --unattended) UNATTENDED=true ;;
     --check) CHECK_ONLY=true ;;
+    --lan) ACCESS_MODE="lan" ;;
+    --ssh-tunnel) ACCESS_MODE="ssh-tunnel" ;;
     --preserve-credentials) PRESERVE="credentials" ;;
     --wipe-credentials) PRESERVE="none" ;;
     --env)
@@ -108,7 +116,9 @@ import socket
 for port in (3000, 4600, 8080):
     with socket.socket() as sock:
         try:
-            sock.bind(("127.0.0.1", port))
+            # Wildcard detects listeners bound either to loopback, LAN, or all
+            # interfaces before Kaanbal creates its own service.
+            sock.bind(("0.0.0.0", port))
         except OSError:
             raise SystemExit(f"Puerto {port} ocupado. Libera el servicio responsable antes de reintentar; no se detuvo ningún proceso ajeno.")
 PYPORT
@@ -195,11 +205,21 @@ chmod 700 "$STATE_HOME"
 
 TOKEN="$(python3 -c 'import secrets; print(secrets.token_urlsafe(24))')"
 TOKEN_HASH="$(printf '%s' "$TOKEN" | sha256sum | cut -c1-12)"
+INSTALLER_HOST="127.0.0.1"
+DISPLAY_HOST="localhost"
+if [[ "$ACCESS_MODE" == "lan" ]]; then
+  INSTALLER_HOST="$(hostname -I 2>/dev/null | awk '{print $1}')"
+  [[ -n "$INSTALLER_HOST" ]] || die "No pude detectar una IP LAN. Usa --ssh-tunnel."
+  [[ "$INSTALLER_HOST" != 127.* && "$INSTALLER_HOST" != "::1" ]] \
+    || die "Sólo encontré loopback. Conecta el servidor a la red o usa --ssh-tunnel."
+  DISPLAY_HOST="$INSTALLER_HOST"
+fi
 cat >"$RUNTIME_ENV" <<EOF
 KAANBAL_INSTALLER_TOKEN=${TOKEN}
 KAANBAL_INSTALLER_PORT=3000
-KAANBAL_INSTALLER_HOST=127.0.0.1
-ACUA_HOST=127.0.0.1
+KAANBAL_INSTALLER_HOST=${INSTALLER_HOST}
+ACUA_HOST=${INSTALLER_HOST}
+KAANBAL_ARGO_FORWARD_ADDRESS=${INSTALLER_HOST}
 KAANBAL_INSTALLER_STATE_DIR=${STATE_DIR}
 KAANBAL_CREDENTIALS_FILE=${CREDS_ENV}
 KAANBAL_INSTALLER_PRIVILEGED=1
@@ -251,7 +271,13 @@ fi
 
 ok "Bootstrap preparado: ${MEM_GB}GB RAM, ${CPUS} CPU, ${DISK_GB}GB libres"
 ok "Token temporal fingerprint: ${TOKEN_HASH}"
-printf '\nEn otra terminal de tu PC, conserva abierto este túnel (sustituye el alias):\n\n'
-printf '  ssh -N -o ExitOnForwardFailure=yes -L 127.0.0.1:3000:127.0.0.1:3000 -L 127.0.0.1:4600:127.0.0.1:4600 -L 127.0.0.1:8080:127.0.0.1:8080 pam-lab\n'
-printf '\nAbre en el navegador de tu PC:\n\n  http://localhost:3000/?token=%s\n\n' "$TOKEN"
+if [[ "$ACCESS_MODE" == "lan" ]]; then
+  printf '\nAbre esta URL desde una PC de la misma red local:\n\n'
+  printf '  http://%s:3000/?token=%s\n\n' "$DISPLAY_HOST" "$TOKEN"
+  printf 'No compartas la URL: el token permite controlar el instalador mientras está activo.\n'
+else
+  printf '\nEn otra terminal de tu PC, conserva abierto este túnel (sustituye el alias):\n\n'
+  printf '  ssh -N -o ExitOnForwardFailure=yes -L 127.0.0.1:3000:127.0.0.1:3000 -L 127.0.0.1:4600:127.0.0.1:4600 -L 127.0.0.1:8080:127.0.0.1:8080 pam-lab\n'
+  printf '\nAbre en el navegador de tu PC:\n\n  http://localhost:3000/?token=%s\n\n' "$TOKEN"
+fi
 printf 'El token se revoca y este servicio se deshabilita al confirmar el acceso final.\n'

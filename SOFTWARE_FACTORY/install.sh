@@ -252,9 +252,12 @@ EOF
 
 systemctl daemon-reload
 systemctl enable --now "$SERVICE"
+PROBE_HOST="$INSTALLER_HOST"
+# A wildcard bind is reachable through loopback; a LAN-only bind is not.
+[[ "$PROBE_HOST" == "0.0.0.0" || "$PROBE_HOST" == "::" ]] && PROBE_HOST="127.0.0.1"
 ready=false
 for attempt in {1..30}; do
-  if curl --fail --silent --max-time 2 http://127.0.0.1:3000/ >/dev/null; then
+  if curl --fail --silent --max-time 2 "http://${PROBE_HOST}:3000/" >/dev/null; then
     ready=true
     break
   fi

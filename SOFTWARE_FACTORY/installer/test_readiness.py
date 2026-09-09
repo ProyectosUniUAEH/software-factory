@@ -77,7 +77,13 @@ class ReadinessTests(unittest.TestCase):
         self.assertIn('--lan) ACCESS_MODE="lan"', script)
         self.assertIn('KAANBAL_INSTALLER_HOST=${INSTALLER_HOST}', script)
         self.assertIn('http://%s:3000/?token=%s', script)
+        self.assertIn('"http://${PROBE_HOST}:3000/"', script)
         self.assertNotIn('KAANBAL_INSTALLER_HOST=0.0.0.0', script)
+
+    def test_agent_inherits_selected_access_address(self):
+        source = (Path(__file__).parent / "server.py").read_text(encoding="utf-8")
+        self.assertIn('os.environ.get("ACUA_HOST", "127.0.0.1")', source)
+        self.assertNotIn('"ACUA_HOST": "127.0.0.1"', source)
 
     def post(self, path, payload):
         handler = object.__new__(server.Handler)

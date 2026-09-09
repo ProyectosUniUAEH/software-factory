@@ -39,4 +39,4 @@ patches:
 secretGenerator:
   - name: fago-secrets
     literals:
-      - APP_SECRET=GVSxfbICmYEXWsGkAtMRHO2u
+      - APP_SECRET=CHANGE_ME

@@ -195,6 +195,9 @@
     <div class="absolute top-0 right-0 w-[500px] h-[500px] bg-blue-600/10 rounded-full blur-[120px] pointer-events-none -z-0 translate-x-1/2 -translate-y-1/2"></div>
     <div class="absolute bottom-0 left-0 w-[500px] h-[500px] bg-purple-600/10 rounded-full blur-[120px] pointer-events-none -z-0 -translate-x-1/2 translate-y-1/2"></div>
 
+    <!-- Node fleet (phase 0) -->
+    <NodeFleet class="screenshot-ignore" />
+
     <!-- Screenshot Floating Button -->
     <ScreenshotButton class="screenshot-ignore" />
 
@@ -649,6 +652,7 @@ import { authState, logout } from '@/store/auth'
 import { systemState, triggerGlobalSync, getSyncStatus, formatTimeAgo } from '@/store/system'
 import { loadRuntimeConfig, getConfig } from '@/config'
 import ScreenshotButton from '@/components/ScreenshotButton.vue'
+import NodeFleet from '@/components/NodeFleet.vue'
 import api from '@/services/api'
 
 const router = useRouter()

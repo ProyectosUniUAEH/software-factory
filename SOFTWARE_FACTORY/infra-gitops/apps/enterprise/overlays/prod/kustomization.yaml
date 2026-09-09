@@ -39,4 +39,4 @@ patches:
 secretGenerator:
   - name: enterprise-secrets
     literals:
-      - APP_SECRET=WjiDbXj7eQspBgxicHwESeVR
+      - APP_SECRET=CHANGE_ME

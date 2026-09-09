@@ -225,8 +225,34 @@
 
                     <!-- ── MULTI-PORT MODE: port × env matrix ── -->
                     <div v-if="isMultiPort" class="space-y-3">
+                      <!-- EMQX Edge profile picker -->
+                      <div v-if="isEmqxTemplate" class="p-3 rounded-lg border border-cyan-500/30 bg-cyan-500/5 space-y-2">
+                        <p class="text-xs text-cyan-300 font-semibold">Perfil de despliegue</p>
+                        <div class="flex flex-col gap-2">
+                          <label class="flex items-start gap-2 cursor-pointer">
+                            <input type="radio" value="edge" v-model="emqxProfile" class="mt-1" @change="applyEmqxProfile" />
+                            <span>
+                              <span class="text-white text-sm font-medium">EMQX Edge — recomendado</span>
+                              <p class="text-[11px] text-slate-400">Broker local-first: MQTT en LAN+VPN, WSS público, dashboard privado.</p>
+                            </span>
+                          </label>
+                          <label class="flex items-start gap-2 cursor-pointer">
+                            <input type="radio" value="custom" v-model="emqxProfile" class="mt-1" @change="applyEmqxProfile" />
+                            <span>
+                              <span class="text-white text-sm font-medium">Personalizado</span>
+                              <p class="text-[11px] text-slate-400">Canales independientes por listener.</p>
+                            </span>
+                          </label>
+                        </div>
+                        <div v-if="emqxProfile === 'edge'" class="text-[10px] text-slate-300 font-mono space-y-1 pt-1 border-t border-white/5">
+                          <div>MQTT 1883 — ✓ cluster ✓ LAN ✓ Tailscale ✗ Internet</div>
+                          <div>WebSocket 8083 — ✓ cluster ✓ LAN ✓ Tailscale ✓ WSS público</div>
+                          <div>Dashboard 18083 — ✓ cluster ✓ LAN ✓ Tailscale ✗ Internet</div>
+                        </div>
+                      </div>
+
                       <p class="text-xs text-blue-400/80 flex items-center gap-1 mb-1">
-                        📡 This template exposes <strong class="text-blue-300">{{ templatePorts.length }} ports</strong> — set each as public or private per environment.
+                        📡 Canales por puerto (multi-canal). Public no aplica a MQTT TCP.
                       </p>
                       <div class="overflow-x-auto">
                         <table class="w-full text-[11px]">
@@ -250,14 +276,19 @@
                               </td>
                               <td v-for="env in allEnvironments" :key="env + '-' + p.name" class="py-1.5 px-0.5">
                                 <div class="flex flex-col gap-[3px]">
-                                  <button v-for="mode in portExposureModes" :key="mode.value"
-                                      type="button" @click="setPortExposure(env, p.name, mode.value)"
-                                      :class="['px-1.5 py-[3px] rounded border transition-all text-center block w-full text-[10px] font-medium',
-                                                 getPortExposure(env, p.name) === mode.value
-                                                   ? mode.activeClass
-                                                   : 'bg-slate-900/50 border-slate-800/50 text-slate-600 hover:border-slate-600 hover:text-slate-400']">
-                                      {{ mode.icon }} {{ mode.label }}
-                                  </button>
+                                  <label v-for="mode in channelOptionsForPort(p.name)" :key="mode.value"
+                                      class="flex items-center gap-1 px-1.5 py-[3px] rounded border text-[10px] cursor-pointer"
+                                      :class="hasPortChannel(env, p.name, mode.value)
+                                        ? mode.activeClass
+                                        : 'bg-slate-900/50 border-slate-800/50 text-slate-600'"
+                                      :title="mode.disabledReason || ''">
+                                    <input type="checkbox"
+                                      :disabled="mode.disabled || emqxProfile === 'edge'"
+                                      :checked="hasPortChannel(env, p.name, mode.value)"
+                                      @change="togglePortChannel(env, p.name, mode.value, $event.target.checked)"
+                                      class="w-3 h-3" />
+                                    {{ mode.icon }} {{ mode.label }}
+                                  </label>
                                 </div>
                               </td>
                             </tr>
@@ -291,8 +322,12 @@
                   </div>
 
                   <div>
-                    <label class="block text-sm font-medium text-gray-300 mb-1">Replicas</label>
-                    <input v-model.number="form.specs.replicas" type="number" min="1" max="5" class="glass-input w-full" />
+                    <label class="block text-sm font-medium text-gray-300 mb-1">Pods (réplicas)</label>
+                    <input v-model.number="form.specs.replicas" type="number" min="1" max="20" class="glass-input w-full" />
+                    <p class="text-[11px] text-slate-500 mt-1">
+                      Copias iguales del contenedor. Con 2+ nodos, k3s puede repartirlas si hay CPU/RAM libre.
+                      Luego puedes cambiar este número en la app ya lanzada. Autoscaler min/max viene después.
+                    </p>
                   </div>
               </div>
           </div>
@@ -527,7 +562,7 @@
                     </div>
                      <div class="col-span-1">
                         <dt class="text-slate-500">Scale</dt>
-                        <dd class="text-white font-medium">{{ form.specs.replicas }} Pods per env</dd>
+                        <dd class="text-white font-medium">{{ form.specs.replicas }} pods (copias)</dd>
                     </div>
 
                     <!-- Dynamic Config Summary -->
@@ -1026,18 +1061,97 @@ const isMultiPort = computed(() => {
     return tpl?.ports && tpl.ports.length > 1
 })
 
+const isEmqxTemplate = computed(() => {
+    const id = (selectedTemplate.value?.id || form.template || '').toLowerCase()
+    return id.includes('emqx')
+})
+
+const emqxProfile = ref('edge')
+
+const EDGE_CHANNELS = {
+    mqtt: ['internal', 'lan', 'tailscale'],
+    ws: ['internal', 'lan', 'tailscale', 'public'],
+    dashboard: ['internal', 'lan', 'tailscale'],
+}
+
 const templatePorts = computed(() => {
     return selectedTemplate.value?.ports || []
 })
 
-const setPortExposure = (env, portName, type) => {
+const normalizeChannels = (value) => {
+    if (!value) return []
+    if (Array.isArray(value)) return [...new Set(value)]
+    if (typeof value === 'string') return value === 'off' ? [] : [value]
+    if (typeof value === 'object' && Array.isArray(value.channels)) return [...value.channels]
+    return []
+}
+
+const setPortChannels = (env, portName, channels) => {
     if (!form.exposure.port_exposure) form.exposure.port_exposure = {}
     if (!form.exposure.port_exposure[env]) form.exposure.port_exposure[env] = {}
-    form.exposure.port_exposure[env][portName] = type
+    let list = normalizeChannels(channels)
+    if (portName === 'mqtt') list = list.filter(c => c !== 'public')
+    form.exposure.port_exposure[env][portName] = list
+}
+
+const setPortExposure = (env, portName, type) => {
+    // Legacy single-mode setter → replace channels with that one mode
+    setPortChannels(env, portName, type ? [type] : [])
+}
+
+const getPortChannels = (env, portName) => {
+    const raw = form.exposure.port_exposure?.[env]?.[portName]
+    const list = normalizeChannels(raw)
+    if (list.length) return list
+    // fallback single mode string from env exposure
+    const fallback = getEnvExposure(env)
+    return fallback && fallback !== 'off' ? [fallback] : ['internal']
 }
 
 const getPortExposure = (env, portName) => {
-    return form.exposure.port_exposure?.[env]?.[portName] || getEnvExposure(env)
+    const ch = getPortChannels(env, portName)
+    return ch[0] || getEnvExposure(env)
+}
+
+const hasPortChannel = (env, portName, channel) => {
+    return getPortChannels(env, portName).includes(channel)
+}
+
+const togglePortChannel = (env, portName, channel, enabled) => {
+    if (emqxProfile.value === 'edge') return
+    if (channel === 'public' && portName === 'mqtt') return
+    let list = getPortChannels(env, portName).filter(c => c !== channel)
+    if (enabled) list.push(channel)
+    if (!list.includes('internal')) list = ['internal', ...list]
+    setPortChannels(env, portName, list)
+}
+
+const channelOptionsForPort = (portName) => {
+    return [
+        { value: 'internal', label: 'Cluster', icon: '🏠', activeClass: 'bg-slate-600 border-slate-500 text-white' },
+        { value: 'lan', label: 'LAN', icon: '📡', activeClass: 'bg-sky-600 border-sky-500 text-white' },
+        { value: 'tailscale', label: 'VPN', icon: '🔒', activeClass: 'bg-purple-600 border-purple-500 text-white' },
+        {
+            value: 'public',
+            label: 'Internet',
+            icon: '🌐',
+            activeClass: 'bg-emerald-600 border-emerald-500 text-white',
+            disabled: portName === 'mqtt',
+            disabledReason: portName === 'mqtt' ? 'MQTT TCP no se publica en Internet (usa WSS)' : '',
+        },
+    ]
+}
+
+const applyEmqxProfile = () => {
+    form.template_config.profile = emqxProfile.value
+    if (emqxProfile.value !== 'edge') return
+    allEnvironments.value.forEach(env => {
+        Object.entries(EDGE_CHANNELS).forEach(([port, channels]) => {
+            if (templatePorts.value.some(p => p.name === port)) {
+                setPortChannels(env, port, channels)
+            }
+        })
+    })
 }
 
 // Initialize config when template changes
@@ -1096,16 +1210,23 @@ watch(() => form.template, (newVal) => {
         if (tpl.ports && tpl.ports.length > 1) {
             form.exposure.ports = tpl.ports
             form.exposure.port_exposure = {}
+            const isEmqx = (tpl.id || '').toLowerCase().includes('emqx')
+            if (isEmqx) {
+                emqxProfile.value = (form.template_config.profile || tpl.default_profile || 'edge')
+                form.template_config.profile = emqxProfile.value
+            }
             allEnvironments.value.forEach(env => {
                 form.exposure.port_exposure[env] = {}
                 tpl.ports.forEach(p => {
-                    // Support per-env format: port_defaults.{env}.{portName}
-                    // Fallback to flat format: port_defaults.{portName}
                     const perEnv = tpl.port_defaults?.[env]?.[p.name]
                     const flat = tpl.port_defaults?.[p.name]
-                    form.exposure.port_exposure[env][p.name] = perEnv || flat || defaultExposure
+                    const raw = perEnv || flat || defaultExposure
+                    form.exposure.port_exposure[env][p.name] = Array.isArray(raw) ? [...raw] : [raw]
                 })
             })
+            if (isEmqx && emqxProfile.value === 'edge') {
+                applyEmqxProfile()
+            }
         } else {
             form.exposure.ports = null
             form.exposure.port_exposure = null

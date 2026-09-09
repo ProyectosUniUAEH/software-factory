@@ -38,11 +38,11 @@ patches:
 secretGenerator:
   - name: homepage-api-secrets
     literals:
-      - SECRET_KEY=zJdNz0ioqj5AYIED3XNUIEzf
+      - SECRET_KEY=CHANGE_ME
       - MONGODB_URI=
       - HOMEPAGE_DB_HOST=homepage-db.prod.svc.cluster.local
       - HOMEPAGE_DB_PORT=27017
       - HOMEPAGE_DB_DATABASE=homepage_api
       - HOMEPAGE_DB_USER=proadmin
-      - HOMEPAGE_DB_PASSWORD=Hvh0DtFdd5WkEN51oCP9sNuz
+      - HOMEPAGE_DB_PASSWORD=CHANGE_ME
       - HOMEPAGE_DB_URI=mongodb://proadmin:Hvh0DtFdd5WkEN51oCP9sNuz@homepage-db.prod.svc.cluster.local:27017/homepage_api?authSource=admin

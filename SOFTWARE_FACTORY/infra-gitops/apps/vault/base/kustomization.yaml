@@ -10,4 +10,4 @@ resources:
 # @kaanbal:if TAILSCALE
   - ingress-tailscale.yaml
 # @kaanbal:endif
-  - vault-auto-init-job.yaml
+  # Local Shamir bootstrap is managed by the installer, not a KMS PostSync job.

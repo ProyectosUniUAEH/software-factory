@@ -39,4 +39,4 @@ patches:
 secretGenerator:
   - name: por1-secrets
     literals:
-      - APP_SECRET=hWtlN7j2HPgRkGgYcYNCLXpq
+      - APP_SECRET=CHANGE_ME

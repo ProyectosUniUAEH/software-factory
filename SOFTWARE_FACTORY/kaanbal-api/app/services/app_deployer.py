@@ -1353,6 +1353,8 @@ class AppDeployer:
                 self._ensure_nginx_ingress_for_public(overlay_dest, app_name, env, app_data)
                 self._upsert_ingress_host_patch(overlay_dest, app_name, env, app_data, "placeholder-app")
 
+            self._sync_tailscale_svc_kustomize_refs(overlay_dest)
+
         # Aplicar reemplazos en todos los YAMLs
         for root, dirs, files in os.walk(dest_dir):
             for file in files:
@@ -1425,6 +1427,9 @@ class AppDeployer:
         for schema_key, schema_def in config_schema.items():
             if schema_key not in template_config and "default" in schema_def:
                 template_config[schema_key] = schema_def["default"]
+        # Allow Edge profile to override PVC size via template_config.storage_size
+        if template_config.get("storage_size") and volumes:
+            volumes = [{**vol, "size": str(template_config["storage_size"])} for vol in volumes]
         is_stateful = bool(volumes)
         main_port = template_details.get("port", 80)
         raw_container = template_details.get("id", app_name)
@@ -1666,6 +1671,22 @@ class AppDeployer:
 
         if is_stateful and wants_http:
             http_svc_name = f"{app_name}-http"
+            # Multi-port managed services (EMQX): companion ClusterIP must expose
+            # every listener so Ingress/LAN backends are not limited to main_port.
+            if catalog_ports and len(catalog_ports) > 1:
+                http_ports = [{
+                    "port": p["port"],
+                    "targetPort": p["port"],
+                    "protocol": p.get("protocol", "TCP"),
+                    "name": p["name"][:15],
+                } for p in catalog_ports]
+            else:
+                http_ports = [{
+                    "port": main_port,
+                    "targetPort": main_port,
+                    "protocol": "TCP",
+                    "name": "http",
+                }]
             http_svc = {
                 "apiVersion": "v1",
                 "kind": "Service",
@@ -1677,17 +1698,32 @@ class AppDeployer:
                 "spec": {
                     "type": "ClusterIP",
                     "selector": {"app": app_name},
-                    "ports": [{
-                        "port": main_port,
-                        "targetPort": main_port,
-                        "protocol": "TCP",
-                        "name": "http"
-                    }]
-                }
+                    "ports": http_ports,
+                },
             }
-            with open(os.path.join(base_dir, "service-http.yaml"), 'w') as f:
+            with open(os.path.join(base_dir, "service-http.yaml"), "w") as f:
                 pyyaml.dump(http_svc, f, default_flow_style=False, sort_keys=False)
             resources_list.append("service-http.yaml")
+
+        # EMQX Edge: MQTT auth bootstrap Job (PostSync)
+        from .managed.emqx_edge import is_emqx_template, render_bootstrap_job
+        if is_emqx_template(template_details.get("id", ""), template_details.get("category", ""), template_details):
+            topic_prefix = str(template_config.get("topic_prefix") or "acuaponia")
+            # Persist topic prefix into secrets pattern via env if not already
+            job_yaml = render_bootstrap_job(app_name, topic_prefix=topic_prefix, dashboard_port=main_port)
+            with open(os.path.join(base_dir, "mqtt-bootstrap-job.yaml"), "w") as f:
+                f.write(job_yaml)
+            resources_list.append("mqtt-bootstrap-job.yaml")
+
+        # PVC retain hint on StatefulSet volumeClaimTemplates
+        if is_stateful and workload.get("spec", {}).get("volumeClaimTemplates"):
+            for vct_item in workload["spec"]["volumeClaimTemplates"]:
+                meta = vct_item.setdefault("metadata", {})
+                anns = meta.setdefault("annotations", {})
+                anns["software-factory.io/retain-on-delete"] = "true"
+                anns["argocd.argoproj.io/sync-options"] = "Prune=false"
+            with open(os.path.join(base_dir, workload_file), "w") as f:
+                pyyaml.dump(workload, f, default_flow_style=False, sort_keys=False)
 
         # --- Generate Ingress for HTTP services ---
         # Previously required health_endpoint — that blocked n8n/emqx (no probe).
@@ -1813,6 +1849,8 @@ class AppDeployer:
                 self._ensure_nginx_ingress_for_public(overlay_dest, app_name, env, app_data)
                 self._upsert_ingress_host_patch(overlay_dest, app_name, env, app_data, app_name)
 
+            self._sync_tailscale_svc_kustomize_refs(overlay_dest)
+
         # Mirror scaffold: patch env domains for Tailscale / both private vars
         base_dest = os.path.join(dest_dir, "base")
         for env in environments:
@@ -1936,10 +1974,7 @@ class AppDeployer:
         """Get the effective exposure type for a specific environment.
 
         Priority order:
-        1. port_exposure matrix (multi-port apps): derive env-level exposure
-           from the per-port values.  If any port is 'public' AND any port is
-           'tailscale' → 'both'.  If any port is 'public' → 'public'.  If any
-           port is 'tailscale' → 'tailscale'.  Otherwise → 'internal'.
+        1. port_exposure matrix (multi-port / multi-channel): derive from channels.
         2. per_env dict (single-exposure apps): direct env key lookup.
         3. exposure.type fallback.
         4. 'internal' hard default.
@@ -1947,18 +1982,10 @@ class AppDeployer:
         if app_data.exposure:
             # Multi-port path: port_exposure takes priority over per_env
             if app_data.exposure.port_exposure:
-                port_modes = list(app_data.exposure.port_exposure.get(env, {}).values())
-                if port_modes:
-                    has_public = "public" in port_modes
-                    has_tailscale = "tailscale" in port_modes
-                    if has_public and has_tailscale:
-                        return "both"
-                    elif has_public:
-                        return "public"
-                    elif has_tailscale:
-                        return "tailscale"
-                    else:
-                        return "internal"
+                from .exposure.channels import derive_env_mode
+                env_ports = app_data.exposure.port_exposure.get(env, {})
+                if env_ports:
+                    return derive_env_mode(env_ports)
             # Single-port path
             if app_data.exposure.per_env:
                 return app_data.exposure.per_env.get(env, app_data.exposure.type or "internal")
@@ -2140,18 +2167,44 @@ spec:
     # -------------------------------------------------------------------------
     async def _generate_per_port_exposure(self, overlay_path: str, app_name: str, env: str,
                                           app_data: AppCreate, spec: TemplateSpec = None) -> bool:
-        """Emit per-port Ingress (public) and Tailscale Service (vpn) for a
-        multi-port app. Returns True when at least one per-port resource was
-        generated (caller can then skip the default whole-app ingress logic).
+        """Emit per-port exposure resources for multi-channel matrices.
 
-        Naming convention:
-          - public host:       `{port}-{app}.{domain}` (or `{port}-{env}-{app}.{domain}`)
-          - tailscale host:    `{env}-{app}-{port}` (truncated to 63 chars)
+        Supports legacy single-mode strings and Edge channels lists:
+          { "mqtt": ["internal","lan","tailscale"], "ws": [...,"public"] }
+
+        Rules:
+          - public is forbidden on mqtt/mqtt_tls (no HTTP Ingress → :1883)
+          - public ws → host mqtt-{app}.{domain}, path /mqtt
+          - lan → LoadBalancer Service (K3s ServiceLB) on requested ports
+          - tailscale → per-port Tailscale expose Service
+          - internal → ClusterIP base service only
         """
+        from .exposure.channels import (
+            normalize_channels,
+            sanitize_public_channels,
+            public_ws_hostname,
+            apply_edge_profile,
+        )
+        from .managed.emqx_edge import is_emqx_template
+
         exposure = getattr(app_data, "exposure", None)
         port_exposure = getattr(exposure, "port_exposure", None) or {}
         env_ports = port_exposure.get(env) or {}
         ports_def = getattr(exposure, "ports", None) or (spec.ports if spec else None) or []
+        template_config = getattr(app_data, "template_config", None) or {}
+        template_id = (app_data.template or "") if app_data else ""
+
+        # Auto-fill Edge profile when empty but template is EMQX edge
+        if not env_ports and is_emqx_template(template_id, template_details={"id": template_id}):
+            profile = (template_config.get("profile") or "edge").lower()
+            if profile == "edge":
+                env_ports = apply_edge_profile(
+                    [{"name": p.name if hasattr(p, "name") else p["name"]} for p in ports_def] or None,
+                    enable_lan=True,
+                    enable_tailscale=True,
+                    enable_public_ws=True,
+                    enable_public_dashboard=False,
+                )
 
         if not env_ports or not ports_def:
             return False
@@ -2163,48 +2216,129 @@ spec:
         tags = await self._get_app_tags(app_name, app_data.template or "", spec)
         protocols = getattr(app_data, "protocols", None) or []
 
-        generated_public: list[tuple[str, int, str]] = []  # (port_name, port_num, host)
-        generated_ts: list[tuple[str, int, str]] = []      # (port_name, port_num, ts_host)
+        generated_public: list[tuple[str, int, str]] = []
+        generated_ts: list[tuple[str, int, str]] = []
+        lan_ports: list[tuple[str, int]] = []
 
-        for port_name, mode in env_ports.items():
+        # Prefer ClusterIP companion for Ingress backends when StatefulSet headless
+        backend_svc = f"{app_name}-http" if os.path.exists(
+            os.path.join(os.path.dirname(overlay_path), "..", "base", "service-http.yaml")
+        ) or os.path.exists(
+            os.path.join(overlay_path, "..", "..", "base", "service-http.yaml")
+        ) else app_name
+        # Resolve relative to infra apps/{app}/base from overlay overlays/{env}
+        base_http = os.path.normpath(os.path.join(overlay_path, "..", "..", "base", "service-http.yaml"))
+        if os.path.exists(base_http):
+            backend_svc = f"{app_name}-http"
+
+        for port_name, raw_mode in env_ports.items():
             port_num = port_map.get(port_name)
             if not port_num:
                 continue
 
-            if mode == "public":
-                is_primary_http_host = port_name in ("http", "main", "websocket")
-                if env == "prod":
-                    host = f"{app_name}.{domain}" if is_primary_http_host else f"{port_name}-{app_name}.{domain}"
-                else:
-                    host = f"{env}-{app_name}.{domain}" if is_primary_http_host else f"{env}-{port_name}-{app_name}.{domain}"
-                self._write_public_ingress_for_port(overlay_path, app_name, port_name, port_num, host, protocols)
-                generated_public.append((port_name, port_num, host))
+            channels = sanitize_public_channels(port_name, normalize_channels(raw_mode))
+            if not channels:
+                continue
 
-            elif mode == "tailscale":
+            if "public" in channels:
+                pname = (port_name or "").lower()
+                if pname in ("ws", "websocket"):
+                    host = public_ws_hostname(app_name, domain, env)
+                    path = "/mqtt"
+                elif pname == "dashboard":
+                    if env == "prod":
+                        host = f"dashboard-{app_name}.{domain}"
+                    else:
+                        host = f"{env}-dashboard-{app_name}.{domain}"
+                    path = "/"
+                else:
+                    # Should have been stripped for mqtt; skip defensively
+                    logger.warning("Skipping public exposure for forbidden/unknown port %s", port_name)
+                    host = None
+                    path = "/"
+                if host:
+                    self._write_public_ingress_for_port(
+                        overlay_path, app_name, port_name, port_num, host, protocols,
+                        ingress_path=path, backend_service=backend_svc,
+                    )
+                    generated_public.append((port_name, port_num, host))
+
+            if "tailscale" in channels:
                 ts_host = f"{env}-{app_name}-{port_name}"[:63]
                 self._write_tailscale_svc_for_port(overlay_path, app_name, port_name, port_num, ts_host, tags)
                 generated_ts.append((port_name, port_num, ts_host))
 
-            # mode == "internal": nothing extra; base Service exposes it inside the cluster.
+            if "lan" in channels:
+                lan_ports.append((port_name, port_num))
 
-        if generated_public or generated_ts:
+            # internal: base ClusterIP already exposes the port
+
+        if lan_ports:
+            self._write_lan_svc(overlay_path, app_name, lan_ports)
+
+        if generated_public or generated_ts or lan_ports:
             logger.info(
                 f"[{env}] Generated per-port exposure for {app_name}: "
-                f"public={[h for _,_,h in generated_public]} tailscale={[h for _,_,h in generated_ts]}"
+                f"public={[h for _,_,h in generated_public]} "
+                f"tailscale={[h for _,_,h in generated_ts]} "
+                f"lan={[p for p,_ in lan_ports]}"
             )
             return True
         return False
 
+    def _write_lan_svc(self, overlay_path: str, app_name: str, lan_ports: list[tuple[str, int]]):
+        """Publish selected ports on the node LAN IP via K3s ServiceLB (LoadBalancer)."""
+        if not lan_ports:
+            return
+        port_lines = []
+        for port_name, port_num in lan_ports:
+            port_lines.append(
+                f"    - name: {port_name[:15]}\n"
+                f"      port: {port_num}\n"
+                f"      targetPort: {port_num}\n"
+                f"      protocol: TCP\n"
+            )
+        ports_yaml = "".join(port_lines)
+        svc_yaml = f"""# Auto-generated LAN LoadBalancer (K3s ServiceLB) - Kaanbal Engine
+apiVersion: v1
+kind: Service
+metadata:
+  name: {app_name}-lan
+  labels:
+    app: {app_name}
+    software-factory.io/exposure: lan
+  annotations:
+    argocd.argoproj.io/sync-options: ServerSideApply=true
+spec:
+  type: LoadBalancer
+  selector:
+    app: {app_name}
+  ports:
+{ports_yaml}"""
+        filename = "lan-svc.yaml"
+        with open(os.path.join(overlay_path, filename), "w") as f:
+            f.write(svc_yaml)
+        self._add_kustomize_resource(overlay_path, filename)
+
     def _write_public_ingress_for_port(self, overlay_path: str, app_name: str, port_name: str,
-                                       port_num: int, host: str, protocols: list[str]):
+                                       port_num: int, host: str, protocols: list[str],
+                                       ingress_path: str = "/", backend_service: str = None):
         """Write a public Ingress for one exposed port. Idempotent."""
         ann = {"nginx.ingress.kubernetes.io/ssl-redirect": "false"}
         if self.ingress_cluster_issuer:
             ann["cert-manager.io/cluster-issuer"] = self.ingress_cluster_issuer
+        # WebSocket / MQTT-over-WS needs upgrade headers
+        pname = (port_name or "").lower()
+        if pname in ("ws", "websocket") or "websocket" in (protocols or []):
+            ann["nginx.ingress.kubernetes.io/proxy-http-version"] = "1.1"
+            ann["nginx.ingress.kubernetes.io/upstream-hash-by"] = "$remote_addr"
+            ann["traefik.ingress.kubernetes.io/router.middlewares"] = ""
         ann.update(self._get_protocol_annotations(protocols))
-        # backend-protocol: GRPC must only be present on grpc-like ports.
-        if "grpc" not in (port_name or "").lower():
+        if "grpc" not in pname:
             ann.pop("nginx.ingress.kubernetes.io/backend-protocol", None)
+        # Drop empty middleware annotation
+        if ann.get("traefik.ingress.kubernetes.io/router.middlewares") == "":
+            ann.pop("traefik.ingress.kubernetes.io/router.middlewares", None)
         ann_lines = "".join(f'    {k}: "{v}"\n' for k, v in ann.items())
 
         tls_yaml = ""
@@ -2212,9 +2346,9 @@ spec:
             tls_yaml = (f"  tls:\n    - hosts:\n        - {host}\n"
                         f"      secretName: tls-{app_name}-{port_name}\n")
 
-        # FastAPI WebSocket templates expose /ws on the same container port as HTTP.
-        # Keep the same public host and route only the websocket path through this ingress.
-        ingress_path = "/ws" if port_name == "websocket" else "/"
+        if not ingress_path:
+            ingress_path = "/ws" if port_name == "websocket" else "/"
+        svc_name = backend_service or app_name
 
         ingress_yaml = f"""# Auto-generated per-port public Ingress ({port_name}) - Kaanbal Engine
 apiVersion: networking.k8s.io/v1
@@ -2236,7 +2370,7 @@ metadata:
             pathType: Prefix
             backend:
               service:
-                name: {app_name}
+                name: {svc_name}
                 port:
                   number: {port_num}
 """
@@ -2306,6 +2440,50 @@ spec:
             content += f"\nresources:\n  - ../../base\n  - {filename}\n"
         with open(kust, "w") as f:
             f.write(content)
+
+    def _sync_tailscale_svc_kustomize_refs(self, overlay_path: str):
+        """Align kustomization resources with tailscale Service YAMLs on disk.
+
+        Vue/React dev overlays historically listed tailscale-svc.yaml even when
+        exposure is public/internal, which breaks kustomize if the file was never
+        generated.
+        """
+        kust_path = os.path.join(overlay_path, "kustomization.yaml")
+        if not os.path.isdir(overlay_path) or not os.path.exists(kust_path):
+            return
+
+        with open(kust_path, "r") as f:
+            content = f.read()
+        original = content
+
+        for fname in os.listdir(overlay_path):
+            if not (fname.startswith("tailscale-svc") and fname.endswith(".yaml")):
+                continue
+            if fname not in content:
+                content = re.sub(
+                    r"([ \t]*)- \.\./\.\./base",
+                    rf"\1- ../../base\n\1- {fname}",
+                    content,
+                    count=1,
+                )
+
+        for line in original.splitlines():
+            match = re.match(r"^[ \t]*- (tailscale-svc[-\w]*\.yaml)\s*$", line)
+            if not match:
+                continue
+            fname = match.group(1)
+            if not os.path.exists(os.path.join(overlay_path, fname)):
+                content = re.sub(
+                    rf"^[ \t]*- {re.escape(fname)}\s*\n",
+                    "",
+                    content,
+                    flags=re.MULTILINE,
+                )
+
+        if content != original:
+            with open(kust_path, "w") as f:
+                f.write(content)
+            logger.info("Synced tailscale-svc refs in %s", kust_path)
 
     async def _generate_tailscale_ingress(self, overlay_path: str, app_name: str, env: str, app_data: AppCreate, spec: TemplateSpec = None):
         """

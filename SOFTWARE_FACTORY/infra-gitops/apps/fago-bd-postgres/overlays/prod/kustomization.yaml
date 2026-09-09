@@ -22,5 +22,5 @@ secretGenerator:
   - name: fago-bd-postgres-secrets
     literals:
       - POSTGRES_USER=proadmin
-      - POSTGRES_PASSWORD=tnrT3J36fB4sJBFSmocEFwt4
+      - POSTGRES_PASSWORD=CHANGE_ME
       - POSTGRES_DB=fago_bd_postgres

@@ -22,4 +22,4 @@ secretGenerator:
   - name: homepage-db-secrets
     literals:
       - MONGO_USER=proadmin
-      - MONGO_PASSWORD=Hvh0DtFdd5WkEN51oCP9sNuz
+      - MONGO_PASSWORD=CHANGE_ME

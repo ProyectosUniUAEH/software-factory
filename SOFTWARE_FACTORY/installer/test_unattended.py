@@ -126,7 +126,7 @@ class EnvFileTests(unittest.TestCase):
     def test_the_shipped_example_is_a_valid_starting_point(self):
         import server
         example = os.path.join(
-            os.path.dirname(os.path.dirname(os.path.abspath(__file__))), ".env.example")
+            os.path.dirname(os.path.abspath(__file__)), "config.example")
         with open(example, encoding="utf-8") as handle:
             values = server.parse_env_text(handle.read())
         # Sin rellenar debe fallar, pero por credenciales ausentes y no porque

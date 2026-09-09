@@ -47,7 +47,7 @@ auth.json
 token*
 *.token
 
-# Carpeta de secretos del proyecto — NUNCA se sube (llaves, backups, .env)
+# Carpeta de secretos del proyecto â€” NUNCA se sube (llaves, backups, .env)
 SOFTWARE_FACTORY_SECRETS/
 # Backups y dumps de base de datos
 *.tar.gz
@@ -57,3 +57,8 @@ vault-keys*
 *.pub
 # Datos locales del runtime del agente
 .acuaponsito/
+
+# Local transfer archives and protected recovery material
+*.tar
+*.zip
+*recovery*.json

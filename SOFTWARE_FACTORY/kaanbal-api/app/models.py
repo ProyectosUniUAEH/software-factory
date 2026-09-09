@@ -70,9 +70,14 @@ class ExposureConfig(BaseModel):
     per_env: Optional[Dict[str, ExposureType]] = None
     # Multi-port support: per-port-per-env exposure
     ports: Optional[List[PortDefinition]] = Field(default=None, description="Port definitions for multi-port apps")
-    port_exposure: Optional[Dict[str, Dict[str, str]]] = Field(
+    # Legacy: { env: { port: "tailscale" } }
+    # Edge:   { env: { port: ["internal","lan","tailscale"] } }
+    port_exposure: Optional[Dict[str, Dict[str, Any]]] = Field(
         default=None,
-        description="Per-env per-port exposure map: { 'prod': { 'mqtt': 'public', 'dashboard': 'tailscale' } }"
+        description=(
+            "Per-env per-port channels. Values may be a mode string or a list of channels: "
+            "{ 'prod': { 'mqtt': ['internal','lan','tailscale'], 'ws': ['public','lan'] } }"
+        ),
     )
 
 

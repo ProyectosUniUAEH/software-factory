@@ -1377,3 +1377,10 @@ async def import_apps_from_cluster(current_user = Depends(get_current_active_use
         "apps":     inserted + updated,
         "message":  f"{len(inserted)} apps inserted, {len(updated)} updated from K8s ingresses",
     }
+
+
+@router.get("/cluster/nodes")
+async def cluster_nodes():
+    """Fleet view: nodes, CPU/RAM, pressures, and pods grouped by node."""
+    from app.services.cluster_inventory import fetch_cluster_inventory
+    return await fetch_cluster_inventory()

@@ -177,7 +177,7 @@
     {
       "id": "emqx",
       "name": "EMQX",
-      "description": "MQTT broker (dashboard + MQTT + WebSocket)",
+      "description": "MQTT broker Edge profile — LAN + Tailscale + WSS público (sin MQTT TCP en Internet)",
       "icon": "emqx",
       "color": "#5e6ad2",
       "category": "iot",
@@ -190,29 +190,73 @@
       "creation_modes": ["config-only"],
       "docker_image": "emqx/emqx:5.8.3",
       "tailscale_tags": ["tag:k8s", "tag:iot"],
-      "ports": [
-        {"name": "mqtt", "port": 1883, "protocol": "TCP"},
-        {"name": "ws", "port": 8083, "protocol": "TCP"},
-        {"name": "dashboard", "port": 18083, "protocol": "TCP"}
+      "kind": "managed-service",
+      "deployment_driver": "emqx-edge",
+      "profiles": ["edge", "custom"],
+      "default_profile": "edge",
+      "volumes": [
+        {
+          "name": "data",
+          "mount_path": "/opt/emqx/data",
+          "size": "5Gi",
+          "retain_on_delete": true
+        }
       ],
-      "tailscale_tcp_ports": ["mqtt", "ws"],
+      "ports": [
+        {"name": "mqtt", "port": 1883, "protocol": "TCP", "description": "MQTT TCP (ESP32 / n8n / edge)"},
+        {"name": "ws", "port": 8083, "protocol": "TCP", "description": "MQTT over WebSocket"},
+        {"name": "dashboard", "port": 18083, "protocol": "TCP", "description": "EMQX Dashboard (admin)"}
+      ],
+      "tailscale_tcp_ports": ["mqtt", "ws", "dashboard"],
       "port_defaults": {
-        "mqtt": "tailscale",
-        "ws": "tailscale",
-        "dashboard": "tailscale"
+        "mqtt": ["internal", "lan", "tailscale"],
+        "ws": ["internal", "lan", "tailscale", "public"],
+        "dashboard": ["internal", "lan", "tailscale"]
+      },
+      "port_channels_policy": {
+        "mqtt": {"forbid_public": true},
+        "ws": {"allow_public": true, "public_path": "/mqtt", "public_host_prefix": "mqtt"},
+        "dashboard": {"allow_public": false, "warn_public": true}
+      },
+      "config_schema": {
+        "profile": {
+          "type": "string",
+          "enum": ["edge", "custom"],
+          "default": "edge",
+          "label": "Perfil de despliegue"
+        },
+        "topic_prefix": {
+          "type": "string",
+          "default": "acuaponia",
+          "label": "Prefijo de topics MQTT"
+        },
+        "storage_size": {
+          "type": "string",
+          "default": "5Gi",
+          "label": "Tamaño PVC"
+        }
       },
       "exposure": {
         "mode": "tailscale",
         "surfaces": {
           "dashboard": { "via": "auto", "path": "/", "label": "Dashboard (L7 HTTP)" },
           "mqtt":      { "via": "tcp",  "path": "",  "label": "MQTT (L4 :1883)" },
-          "ws":        { "via": "tcp",  "path": "",  "label": "MQTT over WS (L4 :8083)" }
+          "ws":        { "via": "tcp",  "path": "/mqtt", "label": "MQTT over WS / WSS" }
         }
       },
       "secrets": [
         {"name": "EMQX_DASHBOARD__DEFAULT_USERNAME", "auto_generate": false, "pattern": "admin"},
-        {"name": "EMQX_DASHBOARD__DEFAULT_PASSWORD", "auto_generate": true, "length": 24}
-      ]
+        {"name": "EMQX_DASHBOARD__DEFAULT_PASSWORD", "auto_generate": true, "length": 24},
+        {"name": "EMQX_MQTT_DEVICE_USERNAME", "auto_generate": false, "pattern": "device"},
+        {"name": "EMQX_MQTT_DEVICE_PASSWORD", "auto_generate": true, "length": 24},
+        {"name": "EMQX_MQTT_FRONTEND_USERNAME", "auto_generate": false, "pattern": "frontend"},
+        {"name": "EMQX_MQTT_FRONTEND_PASSWORD", "auto_generate": true, "length": 24},
+        {"name": "EMQX_TOPIC_PREFIX", "auto_generate": false, "pattern": "acuaponia"}
+      ],
+      "resources": {
+        "requests": {"cpu": "100m", "memory": "256Mi"},
+        "limits": {"cpu": "500m", "memory": "512Mi"}
+      }
     }
   ],
   "stacks": [],

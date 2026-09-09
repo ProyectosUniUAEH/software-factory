@@ -13,8 +13,11 @@ metadata:
 rules:
 # Read access to most resources + patch for services (Tailscale tag management)
 - apiGroups: [""]
-  resources: ["pods", "configmaps", "secrets", "namespaces", "persistentvolumeclaims", "events"]
+  resources: ["pods", "configmaps", "secrets", "namespaces", "persistentvolumeclaims", "events", "nodes"]
   verbs: ["get", "list", "watch"]
+- apiGroups: ["metrics.k8s.io"]
+  resources: ["nodes", "pods"]
+  verbs: ["get", "list"]
 - apiGroups: [""]
   resources: ["services"]
   verbs: ["get", "list", "watch", "patch"]

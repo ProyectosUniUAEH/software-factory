@@ -85,6 +85,14 @@ class ReadinessTests(unittest.TestCase):
         self.assertIn('os.environ.get("ACUA_HOST", "127.0.0.1")', source)
         self.assertNotIn('"ACUA_HOST": "127.0.0.1"', source)
 
+    def test_public_bootstrap_has_scoped_clean_reset(self):
+        script = (Path(__file__).parents[2] / "install.sh").read_text(encoding="utf-8")
+        self.assertIn('--reset) RESET=true', script)
+        self.assertIn("if $RESET && $CUSTOM_DESTINATION", script)
+        self.assertIn('reset-local.sh" --yes --wipe-credentials', script)
+        self.assertIn('as_root rm -rf -- "$DESTINATION"', script)
+        self.assertNotIn("docker system prune", script)
+
     def post(self, path, payload):
         handler = object.__new__(server.Handler)
         handler.path = path

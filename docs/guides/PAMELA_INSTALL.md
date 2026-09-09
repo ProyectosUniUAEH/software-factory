@@ -59,15 +59,17 @@ distintas: sudo puede pedir la contraseña de Ubuntu aunque SSH use una clave.
 El repositorio y la revisión deben ser públicos. Dentro de `ssh pam-lab`:
 
 ```bash
-( set -e; if ! command -v curl >/dev/null; then sudo apt-get update; sudo apt-get install -y curl ca-certificates; fi; revision=main; script=$(mktemp); trap 'rm -f "$script"' EXIT; curl --fail --show-error --location "https://raw.githubusercontent.com/ProyectosUniUAEH/software-factory/${revision}/install.sh" --output "$script"; bash "$script" --ref "$revision" --lan )
+( set -e; if ! command -v curl >/dev/null; then sudo apt-get update; sudo apt-get install -y curl ca-certificates; fi; revision=main; script=$(mktemp); trap 'rm -f "$script"' EXIT; curl --fail --show-error --location "https://raw.githubusercontent.com/ProyectosUniUAEH/software-factory/${revision}/install.sh" --output "$script"; bash "$script" --ref "$revision" --reset --lan )
 ```
 
 Para reproducir la prueba, reemplaza `main` por el SHA completo aprobado al
 publicar; usa el mismo SHA para Pamela. `main` es móvil. Curl debe terminar
 correctamente antes de ejecutar el archivo: un 404 del repo privado detiene
 el comando. El bootstrap descarga en `~/kaanbal-source` y muestra el SHA. No
-reemplaza directorios existentes. Instala dependencias básicas si faltan; el
-humano introduce sudo cuando se solicite. Las credenciales van después en UI.
+con `--reset`, descarga primero la revisión y después elimina únicamente la
+instalación local administrada por Kaanbal, incluidos sus datos y credenciales.
+No borra otros contenedores ni recursos externos. El humano introduce sudo una
+vez cuando se solicite. Las credenciales van después en UI.
 
 Para reanudar un checkout válido ya descargado:
 
@@ -75,9 +77,8 @@ Para reanudar un checkout válido ya descargado:
 sudo bash ~/kaanbal-source/SOFTWARE_FACTORY/install.sh
 ```
 
-No borres carpetas ni uses reset para resolver errores sin diagnóstico. Una
-descarga parcial se conserva para revisar; `--dir` permite elegir otra ruta
-nueva. Las credenciales existentes no se sobrescriben con otro archivo.
+Una descarga parcial se conserva para revisar. `--reset` y `--dir` no pueden
+combinarse, para impedir que una ruta arbitraria se elimine por accidente.
 
 ## 4. Abrir el navegador y completar credenciales
 

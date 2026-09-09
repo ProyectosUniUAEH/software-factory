@@ -64,8 +64,7 @@ rm -rf /tmp/kaanbal-* /tmp/kaanbal-gitops
 rm -f "/etc/systemd/system/${SERVICE}.service"
 
 if ! $PRESERVE; then
-  rm -f /etc/kaanbal/installer.env
-  rm -rf /var/lib/kaanbal/.acuaponsito /var/lib/kaanbal/.kaanbal
+  rm -rf /etc/kaanbal /var/lib/kaanbal /var/backups/kaanbal
 fi
 
 systemctl daemon-reload

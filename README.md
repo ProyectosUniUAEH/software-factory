@@ -5,10 +5,10 @@ GitOps y Argo CD. Las aplicaciones pueden exponerse en LAN, VPN o públicamente.
 
 ## Estado de esta entrega
 
-Instalador piloto en validación. **No cambiar todavía este repositorio a público:**
-la revisión del historial encontró credenciales anteriores. Eliminarlas del árbol
-actual no las elimina de commits, ramas ni PR anteriores. Consulta el
-[informe de publicación](docs/security/PUBLICATION_READINESS.md).
+Instalador piloto en validación. El repositorio ya es público; rota cualquier
+credencial histórica indicada en el
+[informe de publicación](docs/security/PUBLICATION_READINESS.md) antes de usar
+cuentas reales del laboratorio.
 
 ## Instalar
 
@@ -17,14 +17,19 @@ El recorrido completo de Ubuntu, clave SSH, alias, túnel y navegador está en e
 ejecuta dentro de la sesión SSH del servidor:
 
 ```bash
-( set -e; if ! command -v curl >/dev/null; then sudo apt-get update; sudo apt-get install -y curl ca-certificates; fi; revision=main; script=$(mktemp); trap 'rm -f "$script"' EXIT; curl --fail --show-error --location "https://raw.githubusercontent.com/ProyectosUniUAEH/software-factory/${revision}/install.sh" --output "$script"; bash "$script" --ref "$revision" )
+( set -e; if ! command -v curl >/dev/null; then sudo apt-get update; sudo apt-get install -y curl ca-certificates; fi; revision=main; script=$(mktemp); trap 'rm -f "$script"' EXIT; curl --fail --show-error --location "https://raw.githubusercontent.com/ProyectosUniUAEH/software-factory/${revision}/install.sh" --output "$script"; bash "$script" --ref "$revision" --reset --lan )
 ```
 
 Usa un SHA aprobado en lugar de `main` para repetir exactamente el código de una
 prueba. La versión de K3s y Argo usada por el instalador aún requiere fijación y
 validación integral; fijar el código no fija todas las dependencias externas.
 
-El usuario atiende sudo en su terminal. Al arrancar, el comando imprime una URL
+`--reset` permite repetir pruebas limpias: descarga y valida la revisión antes de
+eliminar la instalación local administrada por Kaanbal, sus datos y credenciales.
+No elimina otros contenedores ni modifica recursos externos en GitHub, Cloudflare,
+Docker Hub o Tailscale.
+
+El usuario atiende sudo una vez en su terminal. Al arrancar, el comando imprime una URL
 LAN con este formato:
 
 ```text

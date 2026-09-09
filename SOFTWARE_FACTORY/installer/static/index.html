@@ -214,7 +214,7 @@
           <details class="guide">
             <summary>📘 Guía · crear el PAT</summary>
             <ol>
-              <li><b>Classic (recomendado para bootstrap)</b>: <a href="https://github.com/settings/tokens" target="_blank" rel="noopener">github.com/settings/tokens</a> → scopes <span class="mono">repo</span>, <span class="mono">read:org</span>, <span class="mono">user:email</span>.</li>
+              <li><b>Classic (recomendado para bootstrap)</b>: <a href="https://github.com/settings/tokens" target="_blank" rel="noopener">github.com/settings/tokens</a> → scopes <span class="mono">repo</span>, <span class="mono">workflow</span>, <span class="mono">read:org</span>, <span class="mono">user:email</span>.</li>
               <li>Debes ser <b>admin</b> de la org para que el instalador cree los repos core.</li>
               <li>Pega el token → <b>Validar</b> → elige la org. Si faltan repos, se crean al desplegar.</li>
             </ol>
@@ -297,7 +297,8 @@
 
       <div class="actions">
         <button class="btn btn-ghost" id="btn-back-ia">← Atrás</button>
-        <button class="btn btn-primary" id="btn-deploy">Desplegar célula <span class="arrow">⚡</span></button>
+        <p id="install-validation-error" class="val-msg bad" role="alert"></p>
+          <button class="btn btn-primary" id="btn-deploy">Desplegar célula <span class="arrow">⚡</span></button>
       </div>
     </div>
 
@@ -375,6 +376,7 @@
           <label>Contraseña <input type="password" id="f-final-pass" autocomplete="current-password"></label>
         </div>
         <div class="validate-row">
+          <label><input type="checkbox" id="f-access-confirmed"> Abrí la consola y comprobé el acceso desde mi PC (obligatorio para VPN).</label>
           <button class="btn btn-primary" id="btn-finalize">Confirmar y cerrar instalador</button>
           <span class="val-msg" id="msg-finalize"></span>
         </div>

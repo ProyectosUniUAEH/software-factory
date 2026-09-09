@@ -1,5 +1,5 @@
 #!/bin/bash
-ARGOCD_PASSWORD='vwsT6Gz0OBlhP0kp'
+: "${ARGOCD_PASSWORD:?Set ARGOCD_PASSWORD securely before running}"
 HASHED_PASSWORD=$(htpasswd -bnBC 10 "" "$ARGOCD_PASSWORD" | tr -d ':\n' | sed 's/$2y/$2a/')
 MTIME=$(date +%FT%T%Z)
 

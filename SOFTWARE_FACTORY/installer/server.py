@@ -30,6 +30,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import corebuild            # noqa: E402  builder in-cluster de las imágenes core
 import gitops_publish       # noqa: E402  publicación idempotente de los repos
+import vault_bootstrap
 import gitops_render        # noqa: E402  render del baseline con el dominio real
 
 PORT = int(os.environ.get("KAANBAL_INSTALLER_PORT", "3000"))
@@ -125,6 +126,7 @@ STATE_LOCK = threading.Lock()
 EVENTS = []           # historial de eventos SSE (replay con ?since=)
 EVENT_Q = queue.Queue()
 INSTALLING = False
+INSTALL_REQUEST_LOCK = threading.Lock()
 PORT_FORWARD_PROC = None
 
 STEP_IDS = ["sistema", "k3s", "nodo", "argocd", "ia", "cloudflared",
@@ -326,7 +328,7 @@ def emit(kind, **payload):
 
 
 def log(line, level="info"):
-    emit("log", line=line, level=level)
+    emit("log", line=redact(line), level=level)
 
 
 def set_step(step_id, status, detail=""):
@@ -1270,7 +1272,9 @@ def _grant_covers(existing, wanted):
     for g in existing:
         g_src = set(g.get("src") or [])
         g_dst = set(g.get("dst") or [])
-        if w_src <= g_src and w_dst <= g_dst:
+        if (w_src <= g_src and w_dst <= g_dst
+                and not g.get("srcPosture") and not g.get("via")
+                and ("*" in (g.get("ip") or []) or set(wanted.get("ip") or []) <= set(g.get("ip") or []))):
             return True
     return False
 
@@ -1321,7 +1325,7 @@ def validate_tailscale(client_id, client_secret, dns_suffix=""):
                              data="grant_type=client_credentials", auth=(client_id, client_secret))
     if status == 200 and resp.get("access_token"):
         extra = f" DNS suffix '{suffix}' aceptado." if suffix else ""
-        return {"valid": True, "message": f"OAuth de Tailscale válido. VPN lista para el tier privado.{extra}"}
+        return {"valid": True, "message": f"OAuth de Tailscale válido. Autenticación comprobada; permisos, operador y conectividad se verifican durante el despliegue.{extra}"}
     if status == 401:
         return {"valid": False, "message": "Client ID/Secret inválidos. Regenera el OAuth client en Tailscale."}
     return {"valid": False, "message": f"Tailscale respondió HTTP {status}."}
@@ -1571,141 +1575,32 @@ class PortForward:
         return False
 
 
-def read_vault_root_token(kubectl_fn):
-    """Lee el root token de Vault desde el secret que crea el bootstrap."""
-    rc, raw = kubectl_fn(
-        "-n vault get secret vault-init-keys "
-        "-o jsonpath='{.data.root-token}'", stream=False)
-    if rc != 0 or not (raw or "").strip():
-        return ""
-    import base64 as _b64
-    return _b64.b64decode(raw.strip().strip("'")).decode()
+def bootstrap_vault_lab(kubectl_fn=None, log_fn=None):
+    token = vault_bootstrap.bootstrap()
+    if log_fn:
+        log_fn("Vault desbloqueado y KV v2 verificado. Respalda /etc/kaanbal/vault-recovery.json fuera del servidor; se necesita tras reinicios.", "ok")
+    return token
 
 
-def _vault_json_from_kubectl_output(raw):
-    """Extrae JSON de la salida de kubectl exec (puede incluir exit code al final)."""
-    text = (raw or "").strip()
-    if not text:
-        return None
-    start = text.find("{")
-    end = text.rfind("}")
-    if start < 0 or end <= start:
-        return None
-    try:
-        return json.loads(text[start:end + 1])
-    except json.JSONDecodeError:
-        return None
+def preflight_install(values):
+    # One validation contract for browser and unattended entry points.
+    import unattended
+    cfg, errors = unattended.normalize(values)
+    if not errors:
+        provider_errors, _ = unattended.preflight(cfg)
+        errors.extend(provider_errors)
+    return cfg, errors
 
 
-def bootstrap_vault_lab(kubectl_fn, log_fn=None):
-    """Inicializa y desbloquea Vault en k3s sin KMS (lab/dev). Idempotente.
-
-    El manifiesto vault-auto-init asume auto-unseal con KMS; en k3s local Vault
-    usa Shamir y queda sealed/ sin inicializar si nadie corre este paso.
-    """
-    def say(msg, level="info"):
-        if log_fn:
-            log_fn(msg, level)
-
-    rc, status_json = kubectl_fn(
-        "-n vault exec deploy/vault -- vault status -format=json",
-        stream=False)
-    status = _vault_json_from_kubectl_output(status_json)
-    if not status:
-        say("Vault aún no responde — se omitirá el bootstrap por ahora", "warn")
-        return ""
-
-    if status.get("initialized"):
-        token = read_vault_root_token(kubectl_fn)
-        if status.get("sealed") and token:
-            rc_u, keys_b64 = kubectl_fn(
-                "-n vault get secret vault-init-keys "
-                "-o jsonpath='{.data.unseal-key}'", stream=False)
-            if rc_u == 0 and keys_b64.strip():
-                import base64 as _b64
-                unseal_key = _b64.b64decode(keys_b64.strip().strip("'")).decode()
-                kubectl_fn(
-                    f"-n vault exec deploy/vault -- vault operator unseal {unseal_key}",
-                    stream=False)
-                say("Vault desbloqueado con clave guardada", "ok")
-            else:
-                say("Vault inicializado pero sealed — necesita unseal manual o KMS", "warn")
-        elif token:
-            say("Vault ya inicializado y desbloqueado", "ok")
-        return token
-
-    say("Inicializando Vault (1 share, modo lab)…")
-    rc, init_out = kubectl_fn(
-        "-n vault exec deploy/vault -- vault operator init "
-        "-key-shares=1 -key-threshold=1 -format=json",
-        stream=False)
-    if rc != 0:
-        say(f"No pude inicializar Vault: {(init_out or '')[:200]}", "warn")
-        return ""
-
-    try:
-        init_data = _vault_json_from_kubectl_output(init_out) or {}
-    except Exception:
-        init_data = {}
-    if not init_data:
-        say("Salida inválida de vault operator init", "warn")
-        return ""
-
-    root_token = init_data.get("root_token", "")
-    unseal_keys = init_data.get("unseal_keys_b64") or init_data.get("unseal_keys") or []
-    if not root_token or not unseal_keys:
-        say("Vault init no devolvió token o claves de unseal", "warn")
-        return ""
-
-    unseal_key = unseal_keys[0]
-    rc, unseal_out = kubectl_fn(
-        f"-n vault exec deploy/vault -- vault operator unseal {unseal_key}",
-        stream=False)
-    if rc != 0:
-        say(f"Unseal falló: {(unseal_out or '')[:200]}", "warn")
-        return ""
-
-    # Persistir token para que el instalador/API lo lean después
-    import base64 as _b64
-    token_b64 = _b64.b64encode(root_token.encode()).decode()
-    unseal_b64 = _b64.b64encode(unseal_key.encode()).decode()
-    manifest = f"""apiVersion: v1
-kind: Secret
-metadata:
-  name: vault-init-keys
-  namespace: vault
-type: Opaque
-data:
-  root-token: {token_b64}
-  unseal-key: {unseal_b64}
-"""
-    path = "/tmp/vault-init-keys.yaml"
-    with open(path, "w", encoding="utf-8") as f:
-        f.write(manifest)
-    rc, out = kubectl_fn(f"apply -f {path}", stream=False)
-    if rc != 0:
-        say(f"No pude guardar vault-init-keys: {(out or '')[:200]}", "warn")
-
-    # KV v2 para secretos de apps
-    kubectl_fn(
-        f"-n vault exec deploy/vault -- sh -c "
-        f"\"VAULT_TOKEN={root_token} vault secrets enable -path=secret kv-v2\"",
-        stream=False)
-    say("Vault inicializado, desbloqueado y KV v2 habilitado", "ok")
-    return root_token
-
-
-def _resolve_github_login(cfg):
-    """Garantiza github_login aunque el .env desatendido no lo traiga."""
-    login = (cfg.get("github_login") or "").strip()
-    if login:
-        return login
-    token = (cfg.get("gitops_token") or "").strip()
-    org = (cfg.get("github_org") or "").strip()
-    if not token:
-        return ""
-    gh = validate_github(token, org)
-    return (gh.get("login") or "").strip()
+def confirm_admin_access(username, password):
+    with PortForward("kaanbal-api", 18001, 8000) as pf:
+        if not pf.ready:
+            return False
+        status, body = http_json(
+            "http://127.0.0.1:18001/api/v1/auth/token",
+            {"Content-Type": "application/x-www-form-urlencoded"},
+            data=urllib.parse.urlencode({"username": username, "password": password}), timeout=20)
+        return status == 200 and isinstance(body, dict) and bool(body.get("access_token"))
 
 
 def seed_platform(cfg, argocd_password, log_fn=None, vault_token=""):
@@ -1785,6 +1680,8 @@ def seed_platform(cfg, argocd_password, log_fn=None, vault_token=""):
             except Exception as exc:
                 say(f"⚠ Auth post-seed falló: {str(exc)[:120]}", "warn")
 
+        if not token:
+            return False, "No se pudo autenticar al administrador después de configurar la plataforma"
         if token:
             auth_headers = {**headers, "Authorization": f"Bearer {token}"}
             st_t, body_t = http_json(
@@ -1801,12 +1698,13 @@ def seed_platform(cfg, argocd_password, log_fn=None, vault_token=""):
             data=body_ci, timeout=90)
         if status in (200, 201):
             wired = ", ".join(body.get("configured", [])) if isinstance(body, dict) else ""
-            say(f"Pipelines de GitHub Actions conectados: {wired or 'sin cambios'}", "ok")
+            if not isinstance(body, dict) or body.get("failed") or not {"kaanbal-api", "kaanbal-console"} <= set(body.get("configured", [])):
+                return False, "Configuración de CI incompleta; revisa permisos de secrets de GitHub"
+            say(f"Pipelines de GitHub Actions conectados: {wired}", "ok")
         elif status == 404:
-            say("La versión desplegada del API todavía no expone el bootstrap de CI — "
-                "los pipelines quedan sin secrets hasta la próxima actualización", "warn")
+            return False, "La API desplegada no soporta bootstrap de CI; usa una versión compatible"
         else:
-            say(f"⚠ No pude inyectar los secrets de CI (HTTP {status})", "warn")
+            return False, f"No se pudo configurar CI (HTTP {status})"
         return True, ""
 
     # 1) Prefer in-cluster port-forward (works even before public DNS is live).
@@ -1870,7 +1768,7 @@ def do_install(cfg):
             log("Descargando e instalando k3s (~60s)...")
             privilege = "" if PRIVILEGED else "sudo "
             rc, out = run(
-                f"curl -sfL https://get.k3s.io | {privilege}INSTALL_K3S_EXEC='--write-kubeconfig-mode 644 --node-name {info['hostname']}' sh -",
+                f"curl -sfL https://get.k3s.io | {privilege}INSTALL_K3S_EXEC='--write-kubeconfig-mode 600 --node-name {info['hostname']}' sh -",
                 timeout=420, stream=True)
             if rc != 0:
                 if "terminal is required" in (out or "") or "a password is required" in (out or "").lower():
@@ -1991,25 +1889,19 @@ def do_install(cfg):
             # terraform/tailscale.tf). El usuario no edita ACL a mano.
             acl_ok, acl_why = ensure_tailscale_acl_tags(ts_id, ts_secret, log_fn=log)
             if not acl_ok:
-                log(f"⚠ No pude preparar la ACL de Tailscale ({acl_why}). "
-                    "El OAuth necesita scope de Policy/ACL. Revisa el cliente en "
-                    "login.tailscale.com/admin/settings/oauth.", "warn")
-            # Luego: confirmar que el OAuth puede emitir authkeys con el tag.
+                raise RuntimeError(f"No se pudo preparar la política Tailscale: {acl_why}")
             can_tag, why = tailscale_can_tag(ts_id, ts_secret)
             if not can_tag:
-                log(f"⚠ Tailscale queda fuera: no puedo emitir {TAILSCALE_OPERATOR_TAG} "
-                    f"({why}). Concede al OAuth Auth Keys + tag {TAILSCALE_OPERATOR_TAG} "
-                    "en login.tailscale.com/admin/settings/oauth y reinstala.", "warn")
-            else:
-                kubectl("get ns tailscale || k3s kubectl create namespace tailscale", timeout=30)
-                rc, _ = run(
-                    "k3s kubectl -n tailscale create secret generic operator-oauth "
-                    f"--from-literal=client_id='{ts_id}' --from-literal=client_secret='{ts_secret}' "
-                    "--dry-run=client -o yaml | k3s kubectl apply -f -", timeout=30)
-                if rc == 0:
-                    cfg["tailscale_ready"] = True
-                    log("Tailscale conectado: ACL + secret 'operator-oauth' listos — "
-                        "el tier privado/VPN queda disponible", "ok")
+                raise RuntimeError(f"Tailscale no permite emitir {TAILSCALE_OPERATOR_TAG}: {why}")
+            kubectl("get ns tailscale || k3s kubectl create namespace tailscale", timeout=30)
+            rc, _ = run(
+                "k3s kubectl -n tailscale create secret generic operator-oauth "
+                f"--from-literal=client_id='{ts_id}' --from-literal=client_secret='{ts_secret}' "
+                "--dry-run=client -o yaml | k3s kubectl apply -f -", timeout=30)
+            if rc:
+                raise RuntimeError("No se pudo guardar la credencial del operador Tailscale")
+            cfg["tailscale_ready"] = True
+            log("Política y credencial Tailscale preparadas; pendiente verificar operador", "info")
 
         # 6. Cloudflare Tunnel (tier público) — AQUÍ el dominio cobra vida
         set_step("cloudflared", "running")
@@ -2237,6 +2129,13 @@ def do_install(cfg):
                     raise RuntimeError(f"{deployment} no llegó a Ready ({detail})")
             set_step("gitops", "done", "Engine desplegado y sincronizado por ArgoCD")
 
+        if cfg.get("tailscale_ready"):
+            if not wait_until_exists("deployment/operator", namespace="tailscale", timeout=300):
+                raise RuntimeError("El operador Tailscale no apareció")
+            rc, _ = kubectl("-n tailscale rollout status deployment/operator --timeout=180s", timeout=200)
+            if rc:
+                raise RuntimeError("El operador Tailscale no llegó a Ready")
+
         # 9. Plataforma: sembrar configuración y conectar los pipelines
         if not gitops_ready:
             set_step("plataforma", "skipped", "Requiere GitHub configurado")
@@ -2251,8 +2150,6 @@ def do_install(cfg):
                 argo_plain = _b64pw.b64decode(argo_pwd.strip().strip("'")).decode()
 
             vault_token = bootstrap_vault_lab(kubectl, log_fn=log)
-            if not vault_token:
-                vault_token = read_vault_root_token(kubectl)
 
             ok, detail = seed_platform(cfg, argo_plain, log_fn=log,
                                        vault_token=vault_token)
@@ -2262,8 +2159,7 @@ def do_install(cfg):
             else:
                 # La célula funciona; el operador puede completar esto en la
                 # consola, así que no tiramos toda la instalación por aquí.
-                set_step("plataforma", "failed", "Configura las credenciales desde la consola")
-                log(f"⚠ No pude sembrar la configuración: {detail}", "warn")
+                raise RuntimeError(f"Configuración de plataforma incompleta: {detail}")
 
         # 10. Acceso operativo
         set_step("acceso", "running")
@@ -2274,7 +2170,8 @@ def do_install(cfg):
             password = base64.b64decode(pwd.strip()).decode()
         if PORT_FORWARD_PROC is None or PORT_FORWARD_PROC.poll() is not None:
             PORT_FORWARD_PROC = subprocess.Popen(
-                "k3s kubectl -n argocd port-forward svc/argocd-server 8080:443 --address 0.0.0.0",
+                "k3s kubectl -n argocd port-forward svc/argocd-server 8080:443 "
+                f"--address {os.environ.get('KAANBAL_ARGO_FORWARD_ADDRESS', '127.0.0.1')}",
                 shell=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
             time.sleep(2)
         rc, node = kubectl("get node --no-headers")
@@ -2313,8 +2210,7 @@ def do_install(cfg):
                     log("Aún no responde — el DNS de Cloudflare tarda 1-2 min la primera vez.")
                 time.sleep(10)
             if not console_reachable:
-                log("⚠ La consola no respondió todavía. El despliegue está bien; "
-                    "reintenta la URL en un par de minutos.", "warn")
+                raise RuntimeError("La consola no responde por su URL pública; revisa DNS y túnel, luego reintenta")
 
         with STATE_LOCK:
             STATE["handoff"] = {
@@ -2335,6 +2231,11 @@ def do_install(cfg):
                 "engine_ready": gitops_ready,
             }
 
+        if not gitops_ready or not console_url:
+            raise RuntimeError("El core no tiene una vía de acceso configurada")
+        if console_tailnet:
+            STATE["handoff"]["vpn_verification_required"] = True
+            log("Core listo; verifica el acceso VPN desde tu PC antes de confirmar el cierre", "warn")
         if console_url and gitops_ready:
             set_step("acceso", "done", f"Consola Kaanbal en {console_url}")
             log(f"🎉 Kaanbal operativo. Entra a {console_url} con el usuario "
@@ -2554,9 +2455,16 @@ class Handler(BaseHTTPRequestHandler):
             creds = load_credentials()
             username = str(body.get("username", "")).strip()
             password = str(body.get("password", ""))
-            if not (secrets.compare_digest(username, creds.get("admin_user", "")) and
-                    secrets.compare_digest(password, creds.get("admin_pass", ""))):
+            if not (secrets.compare_digest(username.encode(), creds.get("admin_user", "").encode()) and
+                    secrets.compare_digest(password.encode(), creds.get("admin_pass", "").encode())):
                 return self._json(401, {"error": "Usuario o contraseña no coinciden con el acceso configurado"})
+            if not STATE.get("handoff", {}).get("engine_ready") or any(
+                    step.get("status") in ("failed", "error") for step in STATE.get("steps", {}).values()):
+                return self._json(409, {"error": "Hay componentes pendientes; no se puede cerrar el instalador"})
+            if STATE.get("handoff", {}).get("vpn_verification_required") and not body.get("vpn_access_confirmed"):
+                return self._json(409, {"error": "Confirma primero el acceso real a la consola desde tu VPN"})
+            if not confirm_admin_access(username, password):
+                return self._json(401, {"error": "La API no confirmó el acceso administrativo; el instalador sigue disponible"})
             self._json(200, {"message": "Acceso confirmado. Token temporal revocado."})
             TOKEN_REVOKED = True
             remember("installer", "token-revoked", username=username)
@@ -2595,24 +2503,21 @@ class Handler(BaseHTTPRequestHandler):
             return self._json(201, {"message": "Clip agregado a la tabla master", "clip": clip})
 
         if parsed.path == "/api/install":
-            if INSTALLING:
-                return self._json(409, {"error": "Instalación ya en curso"})
-            restored = load_credentials()
-            merged = {**restored, **{k: v for k, v in body.items() if v not in (None, "")}}
-            if not merged.get("admin_user"):
-                merged["admin_user"] = "admin"
-            if len(str(merged.get("admin_pass", ""))) < 12:
-                return self._json(400, {"error": "La contraseña administrativa debe tener al menos 12 caracteres"})
-            if merged.get("gitops_token") and merged.get("github_org"):
-                gh = validate_github(merged["gitops_token"], merged["github_org"])
-                if gh.get("valid"):
-                    merged["gitops_url"] = gh.get("gitops_url", merged.get("gitops_url", ""))
-                    merged["github_login"] = gh.get("login", "")
-                    merged["github_bootstrap"] = bool(gh.get("bootstrap_needed"))
-            save_credentials(merged)
-            INSTALLING = True
-            threading.Thread(target=do_install, args=(merged,), daemon=True).start()
-            return self._json(202, {"message": "Instalación iniciada", "stream": "/api/stream"})
+            with INSTALL_REQUEST_LOCK:
+                if INSTALLING:
+                    return self._json(409, {"error": "Instalación ya en curso"})
+                restored = load_credentials()
+                merged = {**restored, **{k: v for k, v in body.items() if v not in (None, "")}}
+                try:
+                    merged, errors = preflight_install(merged)
+                except Exception:
+                    return self._json(400, {"error": "No se pudo validar la configuración; no se inició la instalación"})
+                if errors:
+                    return self._json(400, {"error": "No se inició la instalación", "errors": errors})
+                save_credentials(merged)
+                INSTALLING = True
+                threading.Thread(target=do_install, args=(merged,), daemon=True).start()
+                return self._json(202, {"message": "Instalación iniciada", "stream": "/api/stream"})
 
         self.send_error(404)
 
@@ -2629,14 +2534,6 @@ def _shutdown_privileged_installer():
             ["systemctl", "disable", "--now", "kaanbal-installer.service"],
             stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
         )
-
-
-def _kill_port(port):
-    try:
-        subprocess.run(["fuser", "-k", f"{port}/tcp"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=5)
-        time.sleep(0.5)
-    except Exception:
-        pass
 
 
 def _acuaponsito_token_ok():
@@ -2666,8 +2563,8 @@ def _launch_agent_runtime():
         if _acuaponsito_token_ok():
             return "existente"
         # Runtime viejo con otro token (p. ej. tras reiniciar el instalador)
-        _kill_port(4600)
-    env = {**os.environ, "ACUA_TOKEN": TOKEN}
+        raise RuntimeError("Puerto 4600 ocupado por otro runtime; no se cerró ningún proceso")
+    env = {**os.environ, "ACUA_TOKEN": TOKEN, "ACUA_HOST": "127.0.0.1"}
     if ANIM_DIR:
         env["KAANBAL_ANIM_DIR"] = ANIM_DIR
     subprocess.Popen([sys.executable, runtime], env=env,
@@ -2678,14 +2575,14 @@ def _launch_agent_runtime():
 def main():
     os.chdir(STATIC_DIR)
     agent = _launch_agent_runtime()
-    server = ThreadingHTTPServer(("0.0.0.0", PORT), Handler)
+    server = ThreadingHTTPServer((os.environ.get("KAANBAL_INSTALLER_HOST", "127.0.0.1"), PORT), Handler)
     url = f"http://localhost:{PORT}/?token={TOKEN}"
     print("=" * 62)
     print("  🌱 Kaanbal Web Installer")
     print("=" * 62)
     print(f"  URL de acceso (incluye tu token de sesión):\n")
-    print(f"    {url}\n")
-    print("  En un VPS: http://<IP-DEL-SERVIDOR>:%d/?token=%s" % (PORT, TOKEN))
+    print("    URL disponible en la terminal que lanzó install.sh\n" if PRIVILEGED else f"    {url}\n")
+    print("  Acceso remoto mediante túnel SSH; consulta el manual de instalación.")
     if agent:
         print(f"  Agente  : Acuaponsito Runtime {agent} en :4600 (mismo token)")
     print("=" * 62, flush=True)

@@ -39,4 +39,4 @@ patches:
 secretGenerator:
   - name: agencia-de-autos-secrets
     literals:
-      - APP_SECRET=wprBgNi5HysttCGPP9saM7VU
+      - APP_SECRET=CHANGE_ME

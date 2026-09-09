@@ -356,7 +356,7 @@
         tag.textContent = "SOLO VPN TAILSCALE";
         openBtn.href = h.console_url;
         openBtn.textContent = "Abrir consola (por VPN) ⚡";
-        bot.speak("Consola lista y cerrada a internet: solo responde dentro de tu tailnet. 🛡️");
+        bot.speak("Abre la consola desde un equipo conectado a tu VPN y confirma el acceso antes de cerrar.");
       } else if (h.console_reachable) {
         tag.textContent = "EN VIVO · HTTPS";
         openBtn.href = h.console_url;
@@ -391,6 +391,7 @@
         body: JSON.stringify({
           username: $("#f-final-user").value,
           password: $("#f-final-pass").value,
+          vpn_access_confirmed: $("#f-access-confirmed").checked,
         }),
       });
       const data = await r.json();
@@ -439,15 +440,30 @@
       admin_pass: adminPass,
       ai_providers: aiProviders,
     };
-    show("deploy");
-    bot.setState("think");
-    setPhaseChip("desplegando…");
-    connectStream();
-    const r = await fetch(api("/api/install"), {
-      method: "POST", headers: { "Content-Type": "application/json" },
-      body: JSON.stringify(cfg),
-    });
-    if (r.status === 409) termLine("Instalación ya en curso — mostrando progreso actual", "info");
+    const button = $("#btn-deploy");
+    button.disabled = true;
+    button.textContent = "Validando credenciales…";
+    const status = $("#install-validation-error");
+    status.textContent = "";
+    try {
+      const r = await fetch(api("/api/install"), {
+        method: "POST", headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(cfg),
+      });
+      const result = await r.json();
+      if (!r.ok && r.status !== 409) {
+        throw new Error((result.errors || [result.error || "No se pudo iniciar"]).join(" · "));
+      }
+      show("deploy");
+      bot.setState("think");
+      setPhaseChip("desplegando…");
+      connectStream();
+    } catch (error) {
+      status.textContent = error.message;
+    } finally {
+      button.disabled = false;
+      button.textContent = "Instalar Kaanbal";
+    }
   });
 
   /* arranque: Acuaponsito duerme hasta que el agente IA exista */

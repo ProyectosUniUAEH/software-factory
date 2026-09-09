@@ -39,4 +39,4 @@ patches:
 secretGenerator:
   - name: constructora-secrets
     literals:
-      - APP_SECRET=LLueOqhSpDJBn7BWe5JSLC7X
+      - APP_SECRET=CHANGE_ME

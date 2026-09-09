@@ -128,7 +128,7 @@ def normalize(values):
                     f"Pediste {label} solo por VPN, pero faltan TAILSCALE_CLIENT_ID "
                     "y TAILSCALE_CLIENT_SECRET: quedaría sin ninguna vía de acceso.")
 
-    cfg["ai_providers"] = ai_providers_from(cfg)
+    cfg["ai_providers"] = cfg.get("ai_providers") or ai_providers_from(cfg)
     return cfg, errors
 
 
@@ -330,7 +330,11 @@ class Installer:
         ) if cfg.get(key)}
         if cfg.get("ai_providers"):
             payload["ai_providers"] = cfg["ai_providers"]
-        return self._call("/api/install", payload)
+        # Provider checks are shared with the UI and may require several requests.
+        try:
+            return self._call("/api/install", payload, timeout=600)
+        except urllib.error.HTTPError as exc:
+            return exc.code, json.loads(exc.read().decode() or "{}")
 
 
 STEP_LABELS = {
@@ -439,12 +443,22 @@ def verify(cfg, handoff):
         suffix = cfg.get("tailscale_dns", "")
         hostname = f"kaanbal-console.{suffix}" if suffix else ""
         if hostname and resolves(hostname):
-            ok(f"Consola en la VPN: {hostname} resuelve")
+            reachable, detail = server.probe_public_url(f"http://{hostname}", timeout=20)
+            if reachable:
+                ok(f"Consola en la VPN: {hostname} responde")
+            else:
+                healthy = False
+                findings.append(f"Consola VPN no responde: {detail}")
         else:
+            healthy = False
             findings.append(
                 "La consola es solo-VPN: verifica desde un equipo conectado a tu "
                 "tailnet, este servidor puede no resolver MagicDNS todavía.")
             warn("Consola solo-VPN: no puedo comprobarla desde aquí")
+
+    if not handoff.get("engine_ready"):
+        healthy = False
+        findings.append("El instalador no confirmó el core operativo")
 
     for key, label in (("console_url", "Consola"), ("api_url", "API"),
                        ("agent_url", "Agente"), ("argocd_url", "ArgoCD")):

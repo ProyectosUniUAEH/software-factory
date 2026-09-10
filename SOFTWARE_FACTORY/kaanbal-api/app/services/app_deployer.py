@@ -112,7 +112,36 @@ class AppDeployer:
         self.template_service = TemplateService()
         # Git provider (loaded lazily via _load_credentials)
         self._provider: GitProvider | None = None
-    
+        # Dominio efectivo de la operación en curso (multi-dominio, RFC-0001 §3.1).
+        # None = usar el dominio de la instalación. Cada request construye su
+        # propio AppDeployer, así que este contexto no se comparte entre deploys.
+        self._domain_ctx: dict | None = None
+
+    async def bind_domain(self, app_doc: dict | None = None, domain_id: str | None = None):
+        """Fija el dominio bajo el que corre esta operación.
+
+        Resuelve domain_id → dominio default → dominio del instalador. Todo lo
+        que lee `self.domain` (FQDN público, TLS, DNS, sustitución de templates)
+        pasa a operar sobre el dominio de la app sin cambiar sus firmas.
+        """
+        from app.services import domain_service
+
+        doc = dict(app_doc or {})
+        if domain_id:
+            doc["domain_id"] = domain_id
+        resolved = await domain_service.resolve_for_app(doc)
+        self._domain_ctx = {
+            "fqdn": resolved.get("fqdn") or "",
+            "zone_id": resolved.get("cloudflare_zone_id") or "",
+            "tunnel_id": resolved.get("tunnel_id") or "",
+            "domain_id": str(resolved["_id"]) if resolved.get("_id") else None,
+        }
+        logger.info(
+            "Deploy bound to domain %s (source=%s)",
+            self._domain_ctx["fqdn"], resolved.get("source"),
+        )
+        return self._domain_ctx
+
     async def _load_credentials(self, provider_override: str = None):
         """Carga credenciales desde MongoDB (system_config) y construye el git provider"""
         if self._credentials and self._provider and not provider_override:
@@ -210,7 +239,25 @@ class AppDeployer:
     
     @property
     def domain(self):
+        """FQDN base de la operación en curso (dominio de la app, o el de la instalación)."""
+        if self._domain_ctx and self._domain_ctx.get("fqdn"):
+            return self._domain_ctx["fqdn"]
         return self._credentials["domain"] if self._credentials else settings.domain
+
+    @property
+    def cloudflare_zone_id(self):
+        """Zone del dominio en curso. Nunca el zone cacheado del default: eso
+        crearía los registros DNS de un dominio dentro de la zona de otro."""
+        if self._domain_ctx:
+            return self._domain_ctx.get("zone_id") or ""
+        return (self._credentials or {}).get("cloudflare_zone_id", "")
+
+    @property
+    def cloudflare_tunnel_id(self):
+        """Túnel del dominio en curso; los dominios sin túnel propio comparten el default."""
+        if self._domain_ctx and self._domain_ctx.get("tunnel_id"):
+            return self._domain_ctx["tunnel_id"]
+        return (self._credentials or {}).get("cloudflare_tunnel_id", "")
 
     @property
     def ingress_class(self):
@@ -350,6 +397,10 @@ class AppDeployer:
         provider_override = getattr(app_data, 'git_provider', None)
         await self._load_credentials(provider_override=provider_override)
         await emit("credentials", f"Credentials loaded (provider: {self.provider.display_name})")
+
+        # Multi-dominio: fijar el dominio antes de calcular cualquier FQDN, TLS o DNS.
+        await self.bind_domain(domain_id=getattr(app_data, "domain_id", None))
+        await emit("domain", f"Domain: {self.domain}")
 
         app_name = app_data.name
         template_id = app_data.template
@@ -1449,10 +1500,11 @@ class AppDeployer:
         def resolve_tpl(s: str) -> str:
             for k, v in template_config.items():
                 s = s.replace(f"{{{{{k}}}}}", str(v))
-            # Also resolve app-level placeholders
-            domain = self._credentials.get("domain", "") if self._credentials else ""
+            # Also resolve app-level placeholders. self.domain (no _credentials)
+            # para que {{DOMAIN}} respete el dominio de la app, no el de la
+            # instalación.
             s = s.replace("{{APP_NAME}}", app_name)
-            s = s.replace("{{DOMAIN}}", domain)
+            s = s.replace("{{DOMAIN}}", self.domain or "")
             return s
 
         # Build destination directory
@@ -3569,6 +3621,30 @@ patches:
             error_msg = push_result.stderr or push_result.stdout or "Unknown push error"
             raise Exception(f"Failed to push infra-gitops: {self._sanitize_error(error_msg)}")
 
+    async def _cache_zone_id(self, zone_id: str) -> None:
+        """Guarda el zone_id resuelto donde pertenece según el dominio en curso."""
+        db = get_db()
+        bound_id = (self._domain_ctx or {}).get("domain_id")
+        if bound_id:
+            from bson import ObjectId
+            from bson.errors import InvalidId
+
+            try:
+                await db.domains.update_one(
+                    {"_id": ObjectId(bound_id)},
+                    {"$set": {"cloudflare_zone_id": zone_id}},
+                )
+            except InvalidId:
+                pass
+            self._domain_ctx["zone_id"] = zone_id
+            return
+
+        await db.system_config.update_one(
+            {"_id": "main"}, {"$set": {"cloudflare_zone_id": zone_id}},
+        )
+        if self._credentials is not None:
+            self._credentials["cloudflare_zone_id"] = zone_id
+
     async def _setup_cloudflare_dns(self, app_name: str, fqdns: Optional[list[str]] = None) -> bool:
         """Create a Cloudflare DNS CNAME record for a public app.
         
@@ -3578,8 +3654,8 @@ patches:
         """
         cf_token = self._credentials.get("cloudflare_token", "")
         cf_account = self._credentials.get("cloudflare_account_id", "")
-        cf_tunnel_id = self._credentials.get("cloudflare_tunnel_id", "")
-        cf_zone_id = self._credentials.get("cloudflare_zone_id", "")
+        cf_tunnel_id = self.cloudflare_tunnel_id
+        cf_zone_id = self.cloudflare_zone_id
 
         if not cf_token or not cf_account:
             logger.warning("Cloudflare not configured - skipping DNS record creation")
@@ -3603,13 +3679,10 @@ patches:
                     zones = zone_resp.json().get("result", [])
                     if zones:
                         cf_zone_id = zones[0]["id"]
-                        # Cache zone_id in MongoDB for future deploys
-                        db = get_db()
-                        await db.system_config.update_one(
-                            {"_id": "main"},
-                            {"$set": {"cloudflare_zone_id": cf_zone_id}},
-                        )
-                        self._credentials["cloudflare_zone_id"] = cf_zone_id
+                        # Cachear el zone donde corresponda: en el documento del
+                        # dominio si la operación está atada a uno, y solo en
+                        # system_config cuando se trata del dominio de la instalación.
+                        await self._cache_zone_id(cf_zone_id)
                     else:
                         logger.warning(f"No Cloudflare zone found for {self.domain}")
                         return False
@@ -3676,7 +3749,7 @@ patches:
         """
         cf_token = self._credentials.get("cloudflare_token", "")
         cf_account = self._credentials.get("cloudflare_account_id", "")
-        cf_zone_id = self._credentials.get("cloudflare_zone_id", "")
+        cf_zone_id = self.cloudflare_zone_id
         if not cf_token or not cf_account:
             logger.warning("Cloudflare not configured - skipping DNS delete")
             return False

@@ -223,6 +223,21 @@
                       <span>💡</span> {{ exposureHint }}
                     </p>
 
+                    <!-- Dominio padre: solo importa si algún ambiente sale a internet -->
+                    <div v-if="hasPublicExposure && availableDomains.length > 0" class="mb-3 p-3 rounded-lg border border-cyan-500/30 bg-cyan-500/5">
+                      <label class="block text-xs font-semibold text-cyan-300 mb-2">Dominio público</label>
+                      <select v-model="form.domain_id" class="w-full bg-slate-900/80 border border-white/10 rounded-lg px-3 py-2 text-white text-sm">
+                        <option v-for="d in availableDomains" :key="d._id" :value="d._id">
+                          {{ d.fqdn }}{{ d.is_default ? ' (default)' : '' }}
+                        </option>
+                      </select>
+                      <p class="text-[11px] text-slate-400 mt-2">
+                        Producción quedará en
+                        <span class="font-mono text-slate-300">{{ previewPublicHost }}</span>.
+                        Se puede mudar a otro dominio después sin volver a desplegar.
+                      </p>
+                    </div>
+
                     <!-- ── MULTI-PORT MODE: port × env matrix ── -->
                     <div v-if="isMultiPort" class="space-y-3">
                       <!-- EMQX Edge profile picker -->
@@ -740,6 +755,7 @@ const form = reactive({
             mem_limit: "512Mi"
         }
     },
+    domain_id: null,
     exposure: {
         type: 'internal',
         public_path: '/',
@@ -957,6 +973,39 @@ const availableExposureModes = computed(() => {
     const category = tpl.category
     const allowed = categoryDefaults[category] || ['public', 'tailscale', 'lan', 'off']
     return allowed.map(m => allExposureModes[m]).filter(Boolean)
+})
+
+// ── Multi-dominio ─────────────────────────────────────────────────────────
+const availableDomains = ref([])
+
+const loadDomains = async () => {
+    try {
+        const { data } = await axios.get('/api/v1/domains')
+        availableDomains.value = data || []
+        if (!form.domain_id) {
+            const preferred = availableDomains.value.find(d => d.is_default) || availableDomains.value[0]
+            form.domain_id = preferred?._id || null
+        }
+    } catch (e) {
+        // Sin dominios listados el wizard sigue funcionando: el API cae al
+        // dominio default de la instalación.
+        console.error('Failed to load domains:', e)
+    }
+}
+
+// El dominio solo cambia algo si la app sale a internet; en tailscale/lan/internal
+// el FQDN público no se usa.
+const hasPublicExposure = computed(() => {
+    const perEnv = form.exposure.per_env || {}
+    const modes = Object.values(perEnv)
+    if (modes.length === 0) return ['public', 'both'].includes(form.exposure.type)
+    return modes.some(m => ['public', 'both'].includes(m))
+})
+
+const previewPublicHost = computed(() => {
+    const domain = availableDomains.value.find(d => d._id === form.domain_id)
+    const fqdn = domain?.fqdn || 'dominio'
+    return form.name ? `${form.name}.${fqdn}` : `<app>.${fqdn}`
 })
 
 // Computed: hint text for exposure
@@ -1294,6 +1343,8 @@ watch(databaseBindingsEnabled, (enabled) => {
 })
 
 onMounted(async () => {
+    loadDomains()
+
     // Load templates from API
     try {
         const { data } = await axios.get('/api/v1/templates')

@@ -7,6 +7,7 @@ import re
 import logging
 from datetime import datetime
 from bson import ObjectId
+from bson.errors import InvalidId
 
 from app.db import get_db
 from app.models import AppCreate, App, User, ExposureType
@@ -15,6 +16,7 @@ from app.services.pipeline_service import pipeline_service
 from app.services.ai_service import ai_service
 from app.services.argocd_service import argocd_service
 from app.services.activity_log import activity_log, CATEGORY_APP, CATEGORY_DEPLOY, CATEGORY_SYSTEM
+from app.services import domain_service
 from app.defaults import EXPOSURE_RULES, EXPOSURE_RULES_DEFAULT
 from app.routers.auth import get_current_active_user
 
@@ -178,8 +180,18 @@ async def create_app(
     """
     db = get_db()
 
-    config = await db.system_config.find_one({"_id": "main"}, {"domain": 1})
-    domain = str((config or {}).get("domain") or "").strip().lower()
+    # Multi-dominio: el FQDN de la app sale de su domain_id, no del dominio
+    # único de la instalación.
+    if app_data.domain_id:
+        try:
+            target_domain = await db.domains.find_one({"_id": ObjectId(app_data.domain_id)})
+        except InvalidId:
+            raise HTTPException(status_code=400, detail="Invalid domain id")
+        if not target_domain:
+            raise HTTPException(status_code=404, detail="Domain not found")
+    else:
+        target_domain = await domain_service.resolve_for_app(None)
+    domain = str(target_domain.get("fqdn") or "").strip().lower()
     if not domain:
         raise HTTPException(status_code=400, detail="Platform domain is not configured")
 
@@ -205,9 +217,18 @@ async def create_app(
 
     dns_claims = _build_public_dns_claims(app_data, domain, normalized_name, use_root_domain)
     if dns_claims:
-        existing_apps = await db.apps.find({}, {"name": 1, "environments": 1, "exposure": 1, "dns_claims": 1, "is_root_domain": 1}).to_list(500)
+        existing_apps = await db.apps.find({}, {"name": 1, "environments": 1, "exposure": 1, "dns_claims": 1, "is_root_domain": 1, "domain_id": 1}).to_list(500)
+        # Un mismo nombre puede convivir en dos dominios distintos, así que cada
+        # app existente se evalúa contra el suyo (las que ya guardaron
+        # dns_claims traen el FQDN completo y no dependen de este mapa).
+        domain_fqdn_by_id = {
+            str(d["_id"]): str(d.get("fqdn") or "").strip().lower()
+            for d in await db.domains.find({}, {"fqdn": 1}).to_list(100)
+        }
+        default_domain = str((await domain_service.resolve_for_app(None)).get("fqdn") or "").strip().lower()
         for existing_app in existing_apps:
-            existing_claims = _derive_claims_from_existing_app(existing_app, domain)
+            existing_domain = domain_fqdn_by_id.get(str(existing_app.get("domain_id") or "")) or default_domain
+            existing_claims = _derive_claims_from_existing_app(existing_app, existing_domain)
             overlap = sorted(set(c.lower() for c in dns_claims) & set(c.lower() for c in existing_claims))
             if overlap:
                 raise HTTPException(
@@ -253,6 +274,7 @@ async def create_app(
         "app_group": app_group,
         "description": app_data.description,
         "client_id": app_data.client_id,
+        "domain_id": str(target_domain["_id"]) if target_domain.get("_id") else None,
         "environments": app_data.environments,
         "exposure": app_data.exposure.model_dump(),
         "specs": app_data.specs.model_dump(),
@@ -1231,7 +1253,8 @@ async def switch_app_exposure(
     Body:
       {
         "per_env": { "dev": "tailscale", "prod": "public" },
-        "port_exposure": { ... }   # optional
+        "port_exposure": { ... },  # optional
+        "domain_id": "..."          # optional: mudar la app a otro dominio padre
       }
     """
     db = get_db()
@@ -1243,6 +1266,15 @@ async def switch_app_exposure(
     if not isinstance(per_env, dict) or not per_env:
         raise HTTPException(status_code=400, detail="Body must include non-empty per_env map")
 
+    target_domain_id = body.get("domain_id")
+    if target_domain_id:
+        try:
+            target_domain = await db.domains.find_one({"_id": ObjectId(target_domain_id)})
+        except InvalidId:
+            raise HTTPException(status_code=400, detail="Invalid domain id")
+        if not target_domain:
+            raise HTTPException(status_code=404, detail="Domain not found")
+
     port_exposure = body.get("port_exposure")
     deployer = AppDeployer()
     from app.services.exposure import ExposureSwitchService
@@ -1253,6 +1285,7 @@ async def switch_app_exposure(
             app_doc=app,
             per_env=per_env,
             port_exposure=port_exposure,
+            target_domain_id=target_domain_id,
             actor=current_user.username,
         )
     except ValueError as exc:
@@ -1261,9 +1294,23 @@ async def switch_app_exposure(
         logger.exception("exposure switch failed for %s", app_name)
         raise HTTPException(status_code=500, detail=str(exc)[:300])
 
+    domain_updates = {}
+    if result.get("domain_changed"):
+        # Los dns_claims guardados son FQDN del dominio viejo; si no se
+        # recalculan, el chequeo de colisiones de la próxima app reservaría
+        # hosts que ya no existen.
+        moved = {**app, "exposure": result["exposure"], "domain_id": result.get("domain_id")}
+        domain_updates = {
+            "domain_id": result.get("domain_id"),
+            "dns_claims": _derive_claims_from_existing_app(
+                {**moved, "dns_claims": None}, result.get("domain") or "",
+            ),
+        }
+
     await db.apps.update_one(
         {"name": app_name},
         {"$set": {
+            **domain_updates,
             "exposure": result["exposure"],
             "connection_info": {
                 **(app.get("connection_info") or {}),
@@ -1286,6 +1333,8 @@ async def switch_app_exposure(
         target=app_name,
         detail={
             "per_env": per_env,
+            "domain": result.get("domain"),
+            "previous_domain": result.get("previous_domain"),
             "publishers": result.get("publishers"),
             "validated": result.get("validated"),
             "drift": result.get("drift"),

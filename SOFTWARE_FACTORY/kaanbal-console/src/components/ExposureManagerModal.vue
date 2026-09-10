@@ -34,6 +34,37 @@
           <div class="flex-1 min-h-0 grid grid-cols-1 lg:grid-cols-5 overflow-hidden">
             <!-- Matrix -->
             <div class="lg:col-span-3 p-5 overflow-y-auto space-y-4 border-b lg:border-b-0 lg:border-r border-white/10">
+              <!-- Dominio padre -->
+              <div v-if="domains.length > 1" class="rounded-xl border border-cyan-500/25 bg-cyan-500/5 p-4">
+                <div class="flex items-center justify-between gap-3 flex-wrap">
+                  <div class="min-w-0">
+                    <p class="text-xs font-semibold text-cyan-300 uppercase tracking-wide">Dominio padre</p>
+                    <p class="text-[11px] text-slate-400 mt-1">
+                      Mudar de dominio republica el DNS de todos los ambientes públicos y retira
+                      el anterior solo cuando el nuevo ya responde.
+                    </p>
+                  </div>
+                  <div class="flex items-center gap-2 shrink-0">
+                    <select
+                      v-model="draftDomainId"
+                      class="bg-slate-900/80 border border-white/10 rounded-lg px-3 py-1.5 text-white text-sm"
+                    >
+                      <option v-for="d in domains" :key="d._id" :value="d._id">
+                        {{ d.fqdn }}{{ d.is_default ? ' (default)' : '' }}
+                      </option>
+                    </select>
+                    <button
+                      type="button"
+                      class="px-3 py-1.5 rounded-lg text-sm font-medium bg-cyan-500/20 border border-cyan-500/30 text-cyan-200 disabled:opacity-40 disabled:cursor-not-allowed"
+                      :disabled="!domainChanged || busy"
+                      @click="onSwitchDomain"
+                    >
+                      Mudar
+                    </button>
+                  </div>
+                </div>
+              </div>
+
               <div
                 v-for="env in ALL_ENVS"
                 :key="env"
@@ -282,6 +313,7 @@ import {
   startAppEnv,
   stopAppEnv,
 } from '../services/appsApi'
+import axios from 'axios'
 
 const props = defineProps({
   show: { type: Boolean, default: false },
@@ -463,10 +495,53 @@ function syncDraftFromApp() {
   }
 }
 
+// ── Multi-dominio ─────────────────────────────────────────────────────────
+const domains = ref([])
+const draftDomainId = ref(null)
+
+const defaultDomainId = computed(() => domains.value.find(d => d.is_default)?._id || null)
+
+// Una app sin domain_id vive en el default, así que ese es el punto de partida
+// contra el cual se compara la mudanza.
+const currentDomainId = computed(() => props.app?.domain_id || defaultDomainId.value)
+
+const domainChanged = computed(
+  () => !!draftDomainId.value && draftDomainId.value !== currentDomainId.value
+)
+
+async function loadDomains() {
+  try {
+    const { data } = await axios.get('/api/v1/domains')
+    domains.value = data || []
+  } catch (e) {
+    domains.value = []
+  }
+  draftDomainId.value = currentDomainId.value
+}
+
+async function onSwitchDomain() {
+  const target = domains.value.find(d => d._id === draftDomainId.value)
+  const per_env = {}
+  for (const env of activeEnvs.value) per_env[env] = currentMode(env)
+  if (!Object.keys(per_env).length) return
+
+  const data = await runOp(
+    `Switch parent domain → ${target?.fqdn || draftDomainId.value}`,
+    () => patchAppExposure(props.app.name, { per_env, domain_id: draftDomainId.value })
+  )
+  if (data?.domain_changed) {
+    addLog(`domain → ${data.previous_domain} ⇒ ${data.domain}`, 'text-cyan-400')
+  }
+  patchLocalApp({ domain_id: data?.domain_id })
+  applyInventoryFromResult(data)
+  syncDraftFromApp()
+}
+
 watch(
   () => [props.show, props.app?.name, props.app?.exposure, props.app?.environments],
   ([show]) => {
     if (show && props.app) {
+      loadDomains()
       syncDraftFromApp()
       if (!logs.value.length) {
         addLog(`Opened manager for ${props.app.name}`, 'text-blue-400')

@@ -68,10 +68,45 @@ class ExposureSwitchService:
         app_doc: dict,
         per_env: Dict[str, str],
         port_exposure: Optional[Dict[str, Dict[str, str]]] = None,
+        target_domain_id: Optional[str] = None,
         actor: str = "system",
     ) -> Dict[str, Any]:
         await self.deployer._load_credentials()
         app_name = app_doc["name"]
+
+        # Multi-dominio: atarse al dominio actual de la app antes de calcular
+        # nada. Si además se pide mudar de dominio padre, se capturan primero
+        # los hosts viejos —los registros DNS a retirar al final— y recién
+        # después se rebindea, para que overlays, TLS y DNS nuevos se generen
+        # ya sobre el dominio destino.
+        await self.deployer.bind_domain(app_doc=app_doc)
+        previous_domain = self.deployer.domain
+        previous_domain_id = (self.deployer._domain_ctx or {}).get("domain_id")
+        domain_changed = False
+        stale_public_hosts: List[str] = []
+
+        if target_domain_id and str(target_domain_id) != str(previous_domain_id or ""):
+            spec_shim = _AppShim(app_doc, dict(app_doc.get("exposure") or {}))
+            prior_per = dict((app_doc.get("exposure") or {}).get("per_env") or {})
+            for env, mode in prior_per.items():
+                if self._mode_value(mode) in ("public", "both"):
+                    stale_public_hosts.append(
+                        self.deployer._build_public_host(app_name, env, spec_shim)
+                    )
+            await self.deployer.bind_domain(domain_id=target_domain_id)
+            domain_changed = True
+            logger.info(
+                "App %s switching parent domain: %s -> %s",
+                app_name, previous_domain, self.deployer.domain,
+            )
+            # Cambiar de dominio mueve el FQDN de TODOS los ambientes públicos,
+            # no solo los que venían en el PATCH: se republican todos para que
+            # cada uno reciba su DNS y su probe en el dominio nuevo.
+            per_env = {
+                **{env: self._mode_value(mode) for env, mode in prior_per.items()},
+                **{env: self._mode_value(mode) for env, mode in per_env.items()},
+            }
+
         category = app_doc.get("category")
         environments = app_doc.get("environments") or list(per_env.keys()) or ["prod"]
         self.validate_modes(category, per_env)
@@ -286,6 +321,32 @@ class ExposureSwitchService:
                     cf_ok=bool(dns_r.ok) if ensure_dns else None,
                 )
 
+            # Retirar el DNS del dominio anterior solo cuando el nuevo ya
+            # publicó bien. Borrar antes dejaría la app sin ningún host vivo si
+            # el dominio destino todavía no resuelve.
+            if domain_changed and stale_public_hosts:
+                new_dns_ok = all(
+                    r.ok for r in results if r.name and r.name.startswith("dns:")
+                )
+                if new_dns_ok:
+                    await self.deployer.bind_domain(domain_id=previous_domain_id)
+                    try:
+                        await self.deployer._delete_cloudflare_dns(stale_public_hosts)
+                        results.append(PublisherResult(
+                            name="dns:retire-previous", ok=True, status="ok",
+                            detail=f"removed {', '.join(stale_public_hosts)} from {previous_domain}",
+                        ))
+                    finally:
+                        await self.deployer.bind_domain(domain_id=target_domain_id)
+                else:
+                    results.append(PublisherResult(
+                        name="dns:retire-previous", ok=True, status="pending",
+                        detail=(
+                            f"kept {', '.join(stale_public_hosts)} on {previous_domain}: "
+                            "the new domain has not published yet"
+                        ),
+                    ))
+
             # Keep prior observed for envs not touched in this PATCH
             prev_by = ((app_doc.get("connection_inventory") or {}).get("by_env") or {})
             for env, row in list((inventory.get("by_env") or {}).items()):
@@ -338,6 +399,10 @@ class ExposureSwitchService:
             return {
                 "app": app_name,
                 "exposure": exposure,
+                "domain": self.deployer.domain,
+                "domain_id": (self.deployer._domain_ctx or {}).get("domain_id"),
+                "domain_changed": domain_changed,
+                "previous_domain": previous_domain if domain_changed else None,
                 "connection_info": connection,
                 "connection_inventory": inventory,
                 "publishers": summary,
@@ -353,6 +418,7 @@ class ExposureSwitchService:
     async def refresh_status(self, *, app_doc: dict) -> Dict[str, Any]:
         """Read-only reconcile: refresh observed inventory without mutating GitOps."""
         await self.deployer._load_credentials()
+        await self.deployer.bind_domain(app_doc=app_doc)
         app_name = app_doc["name"]
         category = app_doc.get("category") or ""
         exposure = dict(app_doc.get("exposure") or {})
@@ -541,6 +607,7 @@ class ExposureSwitchService:
     ) -> Dict[str, Any]:
         """Create missing overlay (clone from existing env) and register environment."""
         await self.deployer._load_credentials()
+        await self.deployer.bind_domain(app_doc=app_doc)
         app_name = app_doc["name"]
         env = (env or "").strip().lower()
         if env not in ("dev", "staging", "prod"):
@@ -620,6 +687,7 @@ class ExposureSwitchService:
     ) -> Dict[str, Any]:
         """Stop env (replicas=0), set exposure off, drop from environments list."""
         await self.deployer._load_credentials()
+        await self.deployer.bind_domain(app_doc=app_doc)
         app_name = app_doc["name"]
         env = (env or "").strip().lower()
         environments = list(app_doc.get("environments") or [])

@@ -4,9 +4,12 @@
  */
 import axios from 'axios'
 
-export async function patchAppExposure(appName, { per_env, port_exposure } = {}) {
+export async function patchAppExposure(appName, { per_env, port_exposure, domain_id } = {}) {
   const body = { per_env }
   if (port_exposure) body.port_exposure = port_exposure
+  // Mudar de dominio padre reusa esta misma coreografía: publica el DNS nuevo,
+  // lo prueba y recién entonces retira el viejo.
+  if (domain_id) body.domain_id = domain_id
   const { data } = await axios.patch(`/api/v1/apps/${appName}/exposure`, body)
   return data
 }

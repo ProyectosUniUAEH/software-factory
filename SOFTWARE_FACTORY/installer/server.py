@@ -1603,6 +1603,22 @@ def confirm_admin_access(username, password):
         return status == 200 and isinstance(body, dict) and bool(body.get("access_token"))
 
 
+def _resolve_github_login(cfg):
+    """Resolve the token owner, never substitute the destination organization."""
+    login = (cfg.get("github_login") or "").strip()
+    if login:
+        return login
+    token = (cfg.get("gitops_token") or "").strip()
+    if not token:
+        return ""
+    status, user = _github_api("GET", "/user", token)
+    if status == 200 and isinstance(user, dict):
+        login = user.get("login")
+        if isinstance(login, str):
+            return login.strip()
+    return ""
+
+
 def seed_platform(cfg, argocd_password, log_fn=None, vault_token=""):
     """Siembra la configuración de la plataforma en Kaanbal API.
 
@@ -1617,8 +1633,8 @@ def seed_platform(cfg, argocd_password, log_fn=None, vault_token=""):
     github_login = _resolve_github_login(cfg)
     if github_login:
         cfg["github_login"] = github_login
-    elif (cfg.get("gitops_token") or "").strip():
-        say("No pude resolver el login de GitHub — el seed puede caer a Bitbucket", "warn")
+    else:
+        raise RuntimeError("No se pudo resolver el usuario de GitHub; valida la conexión GitHub y reintenta")
 
     domain = (cfg.get("domain") or "").strip().lower()
     payload = {

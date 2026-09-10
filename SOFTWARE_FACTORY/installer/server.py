@@ -587,6 +587,25 @@ def _github_headers(token):
 
 # Raíz SOFTWARE_FACTORY (installer/..) — fuente local para bootstrap de repos core
 SF_ROOT = os.path.normpath(os.path.join(os.path.dirname(os.path.abspath(__file__)), ".."))
+
+
+def upstream_sha():
+    """Commit del monorepo desde el que corre este instalador, o "".
+
+    install.sh deja el checkout como repo git, así que el SHA está disponible.
+    Es la procedencia que la célula guarda para poder compararse con upstream
+    (ADR-002). Si no se puede leer, se reporta vacío en vez de inventarlo: una
+    procedencia falsa haría que la célula se creyera al día para siempre.
+    """
+    repo_root = os.path.normpath(os.path.join(SF_ROOT, ".."))
+    try:
+        out = subprocess.run(
+            ["git", "-C", repo_root, "rev-parse", "HEAD"],
+            capture_output=True, text=True, timeout=15,
+        )
+        return out.stdout.strip() if out.returncode == 0 else ""
+    except Exception:
+        return ""
 # Fuente de verdad GitOps: repos mínimos que la célula reconcilia vía ramas/overlays
 GITHUB_CORE_REPOS = (
     ("infra-gitops", True),
@@ -1664,6 +1683,9 @@ def seed_platform(cfg, argocd_password, log_fn=None, vault_token=""):
         "templates_repo": "kaanbal-templates",
         "admin_user": (cfg.get("admin_user") or "admin").strip(),
         "admin_password": (cfg.get("admin_pass") or "").strip(),
+        # Procedencia del core (ADR-002): sin esto la célula no sabe qué
+        # versión es y nunca podrá ofrecer una actualización.
+        "core_release": cfg.get("core_release"),
     }
 
     headers = {"Content-Type": "application/json"}
@@ -1984,6 +2006,7 @@ def do_install(cfg):
         gitops_ready = False
         build_core = True
         core_tags = {}
+        core_shas = {}
 
         if not (github_org and repo_token):
             set_step("repos", "skipped", "Sin GitHub — conéctalo después desde la consola")
@@ -2008,6 +2031,9 @@ def do_install(cfg):
                 # Mismo tag que produciría GitHub Actions para ese commit, para
                 # que el pipeline y el instalador nunca se contradigan.
                 core_tags[component["name"]] = f"prod-{sha[:7]}"
+                # Procedencia (ADR-002): el SHA completo del repo standalone es
+                # contra lo que después se detecta si el componente fue tuneado.
+                core_shas[component["name"]] = sha
 
             # Catálogo de plantillas: la consola lista un fallback local, pero
             # AppDeployer necesita clonar este repo para scaffold + k8s.
@@ -2065,6 +2091,22 @@ def do_install(cfg):
             cfg["api_tag"] = core_tags.get("kaanbal-api", "bootstrap")
             cfg["console_tag"] = core_tags.get("kaanbal-console", "bootstrap")
             cfg["agent_tag"] = core_tags.get("kaanbal-agent", "bootstrap")
+            # Procedencia del core (ADR-002). Se arma acá porque es el único
+            # punto donde conviven el tag desplegado y el SHA que lo originó.
+            _sha = upstream_sha()
+            cfg["core_release"] = {
+                "version": core_version or (f"install-{_sha[:7]}" if _sha else "install-local"),
+                "upstream_sha": _sha or None,
+                "channel": "stable" if core_version else "custom",
+                "components": {
+                    name: {
+                        "image": f"{cfg.get('docker_user', '')}/{name}",
+                        "tag": core_tags.get(name, "bootstrap"),
+                        "repo_sha": core_shas.get(name),
+                    }
+                    for name in (c["name"] for c in corebuild.CORE_COMPONENTS)
+                },
+            }
             cfg["gitops_repo"] = gitops_repo
             cfg["ingress_class"] = detect_ingress_class()
             log(f"Controlador de ingress detectado: {cfg['ingress_class']}")

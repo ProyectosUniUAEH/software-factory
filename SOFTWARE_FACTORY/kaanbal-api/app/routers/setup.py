@@ -261,6 +261,9 @@ class SetupInstallRequest(BaseModel):
     ingress_cluster_issuer: str = ""
     admin_user: str
     admin_password: str
+    # Procedencia del core (ADR-002). Sin esto la célula no sabe qué versión es
+    # y no puede compararse con upstream ni saber a qué volver.
+    core_release: Optional[dict] = None
 
 
 class TunnelRequest(BaseModel):
@@ -328,6 +331,10 @@ async def run_full_install(request: SetupInstallRequest):
         await db.users.insert_one(admin_user)
 
     config_update = {"mode": request.mode}
+    if request.core_release:
+        # Reinstalar no debe borrar la procedencia si el instalador no la manda;
+        # solo se pisa cuando viene una nueva.
+        config_update["core_release"] = request.core_release
     if request.domain:
         config_update["domain"] = request.domain
     if request.git_username:

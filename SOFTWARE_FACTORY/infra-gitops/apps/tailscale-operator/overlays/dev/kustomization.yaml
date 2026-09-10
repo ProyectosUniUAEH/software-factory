@@ -6,7 +6,7 @@ resources:
 
 namespace: tailscale
 
-# En dev, usamos la imagen stable
+# Keep the operator aligned with the vendored CRDs and proxy image.
 images:
   - name: tailscale/k8s-operator
-    newTag: stable
+    newTag: v1.102.3

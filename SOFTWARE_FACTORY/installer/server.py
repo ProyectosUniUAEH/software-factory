@@ -2146,11 +2146,13 @@ def do_install(cfg):
             set_step("gitops", "done", "Engine desplegado y sincronizado por ArgoCD")
 
         if cfg.get("tailscale_ready"):
+            set_step("gitops", "running", "Verificando operador Tailscale (hasta 180 s)…")
             if not wait_until_exists("deployment/operator", namespace="tailscale", timeout=300):
                 raise RuntimeError("El operador Tailscale no apareció")
             rc, _ = kubectl("-n tailscale rollout status deployment/operator --timeout=180s", timeout=200)
             if rc:
                 raise RuntimeError("El operador Tailscale no llegó a Ready")
+            set_step("gitops", "done", "Engine y operador Tailscale listos")
 
         # 9. Plataforma: sembrar configuración y conectar los pipelines
         if not gitops_ready:

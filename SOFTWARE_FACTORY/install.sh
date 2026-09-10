@@ -26,6 +26,7 @@ usage() {
   cat <<'EOF'
 Uso:
   sudo bash ./install.sh --lan                             # URL directa en la red local
+  sudo bash ./install.sh --tailscale                       # URL directa y privada en la tailnet
   sudo bash ./install.sh --ssh-tunnel                      # acceso mediante túnel SSH
   sudo bash ./install.sh --env /ruta/a/.env                # asistente precargado
   sudo bash ./install.sh --unattended --env /ruta/a/.env   # sin navegador
@@ -44,6 +45,8 @@ Uso:
   --lan            Escucha sólo en la IP LAN detectada y devuelve una URL con
                    token para copiar al navegador. Expone temporalmente 3000,
                    4600 y el acceso provisional 8080 dentro de esa red.
+  --tailscale      Escucha sólo en la IP Tailscale del servidor y devuelve una
+                   URL 100.x.x.x accesible directamente desde la misma tailnet.
   --ssh-tunnel     Escucha en loopback; requiere redirección de puertos por SSH.
   --check          Solo valida el .env contra cada proveedor y sale. No instala
                    ni borra nada.
@@ -66,6 +69,7 @@ while (($#)); do
     --unattended) UNATTENDED=true ;;
     --check) CHECK_ONLY=true ;;
     --lan) ACCESS_MODE="lan" ;;
+    --tailscale) ACCESS_MODE="tailscale" ;;
     --ssh-tunnel) ACCESS_MODE="ssh-tunnel" ;;
     --preserve-credentials) PRESERVE="credentials" ;;
     --wipe-credentials) PRESERVE="none" ;;
@@ -213,6 +217,13 @@ if [[ "$ACCESS_MODE" == "lan" ]]; then
   [[ "$INSTALLER_HOST" != 127.* && "$INSTALLER_HOST" != "::1" ]] \
     || die "Sólo encontré loopback. Conecta el servidor a la red o usa --ssh-tunnel."
   DISPLAY_HOST="$INSTALLER_HOST"
+elif [[ "$ACCESS_MODE" == "tailscale" ]]; then
+  command -v tailscale >/dev/null 2>&1 \
+    || die "Tailscale no está instalado. Instálalo y ejecuta sudo tailscale up."
+  INSTALLER_HOST="$(tailscale ip -4 2>/dev/null | head -1)"
+  [[ "$INSTALLER_HOST" == 100.* ]] \
+    || die "Tailscale no está conectado o no devolvió una IP IPv4 100.x.x.x."
+  DISPLAY_HOST="$INSTALLER_HOST"
 fi
 cat >"$RUNTIME_ENV" <<EOF
 KAANBAL_INSTALLER_TOKEN=${TOKEN}
@@ -276,6 +287,10 @@ ok "Bootstrap preparado: ${MEM_GB}GB RAM, ${CPUS} CPU, ${DISK_GB}GB libres"
 ok "Token temporal fingerprint: ${TOKEN_HASH}"
 if [[ "$ACCESS_MODE" == "lan" ]]; then
   printf '\nAbre esta URL desde una PC de la misma red local:\n\n'
+  printf '  http://%s:3000/?token=%s\n\n' "$DISPLAY_HOST" "$TOKEN"
+  printf 'No compartas la URL: el token permite controlar el instalador mientras está activo.\n'
+elif [[ "$ACCESS_MODE" == "tailscale" ]]; then
+  printf '\nAbre esta URL desde un dispositivo autorizado en la misma tailnet:\n\n'
   printf '  http://%s:3000/?token=%s\n\n' "$DISPLAY_HOST" "$TOKEN"
   printf 'No compartas la URL: el token permite controlar el instalador mientras está activo.\n'
 else

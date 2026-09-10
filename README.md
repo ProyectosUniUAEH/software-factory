@@ -41,6 +41,10 @@ completa las credenciales. No hace falta entregar contraseñas, archivos `.env`
 ni claves privadas al agente. Para servidores sin una LAN confiable también se
 puede ejecutar el bootstrap con `--ssh-tunnel`.
 
+Si Tailscale ya está instalado y autenticado en el servidor, sustituye `--lan`
+por `--tailscale`. El instalador escuchará únicamente en su IP `100.x.x.x` y
+mostrará una URL accesible directamente desde los dispositivos de la tailnet.
+
 El perfil actual necesita GitHub y Docker Hub. Cloudflare y dominio corresponden
 al acceso público; Tailscale al privado. No se ha implementado el builder local
 con registro OCI alternativo. Vault usa recuperación manual después de reiniciar.

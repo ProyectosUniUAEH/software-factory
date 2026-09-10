@@ -14,9 +14,10 @@ while (($#)); do
     --dir) shift; (($#)) || die '--dir necesita una ruta'; DESTINATION="$1"; CUSTOM_DESTINATION=true ;;
     --reset) RESET=true ;;
     --lan) INSTALL_MODE="--lan" ;;
+    --tailscale) INSTALL_MODE="--tailscale" ;;
     --ssh-tunnel) INSTALL_MODE="--ssh-tunnel" ;;
     -h|--help)
-      printf 'Uso: bash install.sh [--ref commit|tag|branch] [--dir directorio-nuevo] [--reset] [--lan|--ssh-tunnel]\n'
+      printf 'Uso: bash install.sh [--ref commit|tag|branch] [--dir directorio-nuevo] [--reset] [--lan|--tailscale|--ssh-tunnel]\n'
       printf '  --reset elimina la instalación local administrada por Kaanbal y sus credenciales.\n'
       printf 'Reanudar: sudo bash <directorio>/SOFTWARE_FACTORY/install.sh\n'
       exit 0 ;;

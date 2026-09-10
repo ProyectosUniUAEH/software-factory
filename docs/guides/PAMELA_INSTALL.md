@@ -87,6 +87,11 @@ El modo `--lan` imprime una URL como
 misma red. No compartas la URL: el token permite controlar el instalador hasta
 que confirmas el acceso y el servicio temporal se apaga.
 
+Si el servidor ya está conectado a Tailscale, usa `--tailscale` en lugar de
+`--lan`. El instalador valida la conexión, escucha únicamente en la IP
+`100.x.x.x` del servidor e imprime una URL que abre directamente cualquier
+dispositivo autorizado en la misma tailnet.
+
 Si la red local no es de confianza, inicia con `--ssh-tunnel`. En ese modo,
 desde otra terminal PowerShell conserva abierto:
 

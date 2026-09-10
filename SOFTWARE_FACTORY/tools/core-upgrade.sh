@@ -50,7 +50,7 @@ log "Estado actual:"
 snapshot | sed 's/^/  /'
 [[ "$MODE" == snapshot ]] && exit 0
 
-ORG=$(kubectl get cm -n "$NS" -o jsonpath='{.items[0].metadata.name}' >/dev/null 2>&1; echo "${KAANBAL_ORG:-}")
+ORG=${KAANBAL_ORG:-}
 [[ -n "$ORG" ]] || die "Exporta KAANBAL_ORG con la org de GitHub de esta célula (ej: siboenglishnest)"
 
 TOKEN=$(kubectl get secret kaanbal-build-git -n "$NS" -o jsonpath='{.data.token}' | base64 -d)

@@ -589,6 +589,24 @@ def _github_headers(token):
 SF_ROOT = os.path.normpath(os.path.join(os.path.dirname(os.path.abspath(__file__)), ".."))
 
 
+def tunnel_id_from_token(token):
+    """Id del túnel contenido en un token de cloudflared, o "".
+
+    El token es base64 de {"a": cuenta, "t": túnel, "s": secreto}. Se decodifica
+    solo para leer "t"; el secreto nunca se registra.
+    """
+    import base64 as _b64
+    raw = (token or "").strip()
+    if not raw:
+        return ""
+    try:
+        padded = raw + "=" * (-len(raw) % 4)
+        data = json.loads(_b64.b64decode(padded).decode("utf-8"))
+        return str(data.get("t") or "")
+    except Exception:
+        return ""
+
+
 def upstream_sha():
     """Commit del monorepo desde el que corre este instalador, o "".
 
@@ -1676,6 +1694,8 @@ def seed_platform(cfg, argocd_password, log_fn=None, vault_token=""):
         "tailscale_dns_suffix": (cfg.get("tailscale_dns") or "").strip(),
         "cloudflare_token": (cfg.get("cf_token") or "").strip(),
         "cloudflare_account_id": (cfg.get("cf_account") or "").strip(),
+        "cloudflare_tunnel_id": (cfg.get("cf_tunnel_id") or "").strip(),
+        "cloudflare_zone_id": (cfg.get("cf_zone_id") or "").strip(),
         "ingress_class": (cfg.get("ingress_class") or "traefik").strip(),
         "ingress_cluster_issuer": (
             (cfg.get("cluster_issuer") or "") if cfg.get("cluster_tls") else ""),
@@ -1970,9 +1990,17 @@ def do_install(cfg):
                     tunnel_token = None
                 else:
                     tunnel_token = res.get("tunnel_token")
+                    if res.get("zone_id"):
+                        cfg["cf_zone_id"] = res["zone_id"]
                     with STATE_LOCK:
                         STATE["tunnel_dns"] = res.get("dns", [])
             if tunnel_token:
+                # El id del túnel se guarda en la plataforma: sin él la API no puede
+                # cablear dominios adicionales ni crear CNAMEs por app. Se deriva
+                # del token para cubrir también el caso de un token pegado a mano.
+                derived = tunnel_id_from_token(tunnel_token)
+                if derived:
+                    cfg["cf_tunnel_id"] = derived
                 # 2) secret + 3) correr cloudflared (data plane: conexión saliente al edge)
                 kubectl("get ns prod || k3s kubectl create namespace prod", timeout=30)
                 rc, _ = run(

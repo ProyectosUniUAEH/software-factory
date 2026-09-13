@@ -86,6 +86,74 @@ async def resolve_for_app(app_doc: Optional[dict]) -> Dict[str, Any]:
     return fallback
 
 
+async def installation_tunnel_id(client: httpx.AsyncClient, config: Dict[str, Any]) -> str:
+    """Túnel de la instalación: el guardado, o el que enruta hoy su dominio.
+
+    Instalaciones anteriores no guardaban el id del túnel. En vez de listar
+    túneles y elegir uno —que puede atar apps a un túnel muerto— se lee el
+    CNAME wildcard del dominio de la instalación, que es la ruta que Cloudflare
+    está usando realmente. Se cachea en system_config al encontrarlo.
+    """
+    saved = (config.get("cloudflare_tunnel_id") or "").strip()
+    if saved:
+        return saved
+
+    token = config.get("cloudflare_token", "")
+    domain = (config.get("domain") or "").strip()
+    if not token or not domain:
+        return ""
+    try:
+        zone_id = config.get("cloudflare_zone_id") or ""
+        if not zone_id:
+            zr = await client.get(f"{CF_API}/zones?name={domain}", headers=_headers(token))
+            zones = zr.json().get("result", []) if zr.status_code == 200 else []
+            zone_id = zones[0]["id"] if zones else ""
+        if not zone_id:
+            return ""
+        rr = await client.get(
+            f"{CF_API}/zones/{zone_id}/dns_records?type=CNAME&name=*.{domain}",
+            headers=_headers(token),
+        )
+        records = rr.json().get("result", []) if rr.status_code == 200 else []
+    except Exception as exc:
+        logger.warning("No se pudo descubrir el túnel de %s: %s", domain, exc)
+        return ""
+
+    suffix = ".cfargotunnel.com"
+    for record in records:
+        content = str(record.get("content") or "")
+        if content.endswith(suffix):
+            tunnel_id = content[: -len(suffix)]
+            db = get_db()
+            await db.system_config.update_one(
+                {"_id": "main"},
+                {"$set": {"cloudflare_tunnel_id": tunnel_id, "cloudflare_zone_id": zone_id}},
+            )
+            logger.info("Túnel de la instalación descubierto desde *.%s", domain)
+            return tunnel_id
+    return ""
+
+
+async def request_activation_check(client: httpx.AsyncClient, token: str, zone_id: str) -> str:
+    """Pide a Cloudflare revisar ya los nameservers de una zona pendiente.
+
+    Sin esto la activación depende del ciclo propio de Cloudflare, que puede
+    tardar horas aunque el registrador ya esté apuntado. Best-effort: Cloudflare
+    limita la frecuencia y un rechazo no invalida nada.
+    """
+    try:
+        resp = await client.put(
+            f"{CF_API}/zones/{zone_id}/activation_check", headers=_headers(token),
+        )
+        if resp.status_code == 200:
+            return "Se pidió a Cloudflare revisar los nameservers ahora."
+        errors = resp.json().get("errors") or []
+        msg = errors[0].get("message") if errors else f"HTTP {resp.status_code}"
+        return f"Cloudflare no aceptó revisar ahora ({msg}); lo hará en su propio ciclo."
+    except Exception:
+        return ""
+
+
 async def verify(fqdn: str, *, tunnel_id: str = "") -> Dict[str, Any]:
     """Valida que un dominio pueda servir apps publicas. No modifica nada.
 
@@ -111,6 +179,7 @@ async def verify(fqdn: str, *, tunnel_id: str = "") -> Dict[str, Any]:
 
     zone_id = None
     zone_status = None
+    effective_tunnel = ""
     async with httpx.AsyncClient(timeout=20) as client:
         try:
             resp = await client.get(f"{CF_API}/zones?name={fqdn}", headers=_headers(token))
@@ -142,10 +211,12 @@ async def verify(fqdn: str, *, tunnel_id: str = "") -> Dict[str, Any]:
             ))
         else:
             nameservers = ", ".join(zone.get("name_servers") or []) or "los que indica Cloudflare"
+            nudge = await request_activation_check(client, token, zone_id)
             checks.append(_check(
                 "zone", "Zona en Cloudflare", "fail",
                 f"La zona existe pero esta en estado '{zone_status}'. Apunta los "
-                f"nameservers del registrador a: {nameservers}.",
+                f"nameservers del registrador a: {nameservers}. Si ya lo hiciste, "
+                f"la propagacion puede tardar de minutos a horas. {nudge}".strip(),
             ))
 
         if zone_account and account_id and zone_account != account_id:
@@ -160,7 +231,7 @@ async def verify(fqdn: str, *, tunnel_id: str = "") -> Dict[str, Any]:
                 "La zona vive en la misma cuenta que el tunel.",
             ))
 
-        effective_tunnel = tunnel_id or config.get("cloudflare_tunnel_id", "")
+        effective_tunnel = tunnel_id or await installation_tunnel_id(client, config)
         if not effective_tunnel:
             checks.append(_check(
                 "tunnel", "Tunel de Cloudflare", "fail",
@@ -196,6 +267,9 @@ async def verify(fqdn: str, *, tunnel_id: str = "") -> Dict[str, Any]:
         "ok": ok,
         "zone_id": zone_id,
         "zone_status": zone_status,
+        # El túnel efectivo (guardado o descubierto) para que el alta provisione
+        # contra el mismo que se validó.
+        "tunnel_id": effective_tunnel or None,
         "checks": checks,
     }
 

@@ -257,5 +257,49 @@ class VerifyTests(unittest.TestCase):
         self.assertIn("ns1.cloudflare.com", zone_check["detail"])
 
 
+class TunnelDiscoveryTests(unittest.TestCase):
+    """Instalaciones anteriores no guardaban el id del tunel en system_config."""
+
+    def _client(self, cname_content):
+        client = FakeClient([])
+
+        async def fake_get(url, **kw):
+            if "/zones?" in url:
+                return FakeResponse({"result": [{"id": "zone-default"}]})
+            if "dns_records" in url:
+                return FakeResponse({"result": [{"content": cname_content}]})
+            return FakeResponse({"result": {}})
+
+        client.get = fake_get
+        return client
+
+    def test_uses_saved_tunnel_without_calling_cloudflare(self):
+        db = FakeDB(system_config=CONFIG)
+        with mock.patch.object(ds, "get_db", return_value=db):
+            got = run(ds.installation_tunnel_id(FakeClient([]), CONFIG[0]))
+        self.assertEqual(got, "tunnel-1")
+        self.assertEqual(db.system_config.updates, [])
+
+    def test_discovers_tunnel_from_live_wildcard_cname_and_caches_it(self):
+        config = {k: v for k, v in CONFIG[0].items() if k != "cloudflare_tunnel_id"}
+        db = FakeDB(system_config=[config])
+        client = self._client("abc-123.cfargotunnel.com")
+        with mock.patch.object(ds, "get_db", return_value=db):
+            got = run(ds.installation_tunnel_id(client, config))
+        self.assertEqual(got, "abc-123")
+        cached = db.system_config.updates[0][1]["$set"]
+        self.assertEqual(cached["cloudflare_tunnel_id"], "abc-123")
+
+    def test_ignores_wildcard_that_does_not_point_to_a_tunnel(self):
+        """Un CNAME a otro origen no es un tunel: inventarlo ataria apps a la nada."""
+        config = {k: v for k, v in CONFIG[0].items() if k != "cloudflare_tunnel_id"}
+        db = FakeDB(system_config=[config])
+        client = self._client("otro-origen.example.com")
+        with mock.patch.object(ds, "get_db", return_value=db):
+            got = run(ds.installation_tunnel_id(client, config))
+        self.assertEqual(got, "")
+        self.assertEqual(db.system_config.updates, [])
+
+
 if __name__ == "__main__":
     unittest.main()

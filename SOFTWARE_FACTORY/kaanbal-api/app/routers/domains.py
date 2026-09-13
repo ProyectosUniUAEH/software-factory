@@ -112,6 +112,7 @@ async def create_domain(domain_data: DomainCreate):
         )
 
     zone_id = domain_data.cloudflare_zone_id or report["zone_id"]
+    tunnel_id = report.get("tunnel_id") or tunnel_id
     try:
         provisioned = await domain_service.provision(fqdn, zone_id=zone_id, tunnel_id=tunnel_id)
     except domain_service.DomainError as exc:
@@ -187,6 +188,7 @@ async def repair_domain(domain_id: str):
         raise HTTPException(status_code=422, detail={"checks": report["checks"]})
 
     zone_id = report.get("zone_id") or domain.get("cloudflare_zone_id")
+    tunnel_id = report.get("tunnel_id") or tunnel_id
     try:
         provisioned = await domain_service.provision(
             domain["fqdn"], zone_id=zone_id, tunnel_id=tunnel_id,

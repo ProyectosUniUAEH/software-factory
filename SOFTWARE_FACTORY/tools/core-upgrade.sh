@@ -75,6 +75,33 @@ component_tag() {
   printf 'prod-%s' "${sha:0:7}"
 }
 
+# ¿Ya está publicada? Reusa corebuild.image_exists del instalador. La credencial
+# viaja por stdin desde el Secret, nunca como argumento visible en `ps`. Ante la
+# duda responde "no": reconstruir es seguro, dar por buena una imagen que no
+# existe no.
+image_exists() {
+  local repo=$1 tag=$2
+  kubectl get secret "$REGISTRY_SECRET" -n "$NS" -o jsonpath='{.data.\.dockerconfigjson}' 2>/dev/null \
+  | base64 -d 2>/dev/null \
+  | PYTHONPATH="$SOURCE_DIR/SOFTWARE_FACTORY/installer" python3 -c '
+import base64, json, sys
+import corebuild
+repo, tag, user = sys.argv[1], sys.argv[2], sys.argv[3]
+try:
+    auths = json.load(sys.stdin).get("auths", {})
+except ValueError:
+    sys.exit(1)
+password = ""
+for entry in auths.values():
+    password = entry.get("password", "")
+    if not password and entry.get("auth"):
+        password = base64.b64decode(entry["auth"]).decode().split(":", 1)[-1]
+    if password:
+        break
+sys.exit(0 if corebuild.image_exists(user, repo, tag, password) else 1)
+' "$repo" "$tag" "$DOCKER_USER"
+}
+
 # ── Promoción: un solo commit para todos los componentes ─────────────────────
 # Un commit por componente daría ventanas donde corren versiones mezcladas.
 promote() {
@@ -203,7 +230,10 @@ print(\"preflight ok\")
     if git diff --cached --quiet; then
       log "$c: sin cambios"
     else
-      git commit --quiet -m "upgrade: sync desde software-factory@${UPSTREAM:0:7}"
+      # [skip ci]: la promoción la hace esta transacción. Si CI también
+      # promoviera, podría volver a subir una versión que el rollback acaba de
+      # retirar. CI queda para los push directos al repo (flujo custom).
+      git commit --quiet -m "upgrade: sync desde software-factory@${UPSTREAM:0:7} [skip ci]"
       git push --quiet origin HEAD:main
       log "$c publicado en $ORG/$c → $(git rev-parse HEAD | cut -c1-7)"
     fi
@@ -218,6 +248,10 @@ if [[ "$PHASE" == all || "$PHASE" == build ]]; then
 
   for c in "${COMPONENTS[@]}"; do
     TAG=$(component_tag "$c")
+    if image_exists "$c" "$TAG"; then
+      log "$c:$TAG ya está en Docker Hub — no se reconstruye"
+      continue
+    fi
     JOB="kaanbal-build-${c}-${TAG#prod-}"
     log "Construyendo $c:$TAG (Job $JOB)"
     kubectl delete job "$JOB" -n "$NS" --ignore-not-found >/dev/null 2>&1

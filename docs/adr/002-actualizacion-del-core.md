@@ -122,6 +122,21 @@ lock → preflight → snapshot → migrar → promover → esperar rollout → 
 - **rollback**: restaura los digests del snapshot. Barato y exacto: las imágenes
   son inmutables y siguen publicadas. No se reconstruye nada.
 
+### 6b. Un solo dueño de la promoción
+
+Los repos standalone traen un workflow de GitHub Actions que construye y
+promueve en cada push. Si el upgrade empuja código y además promueve, hay **dos
+actores** escribiendo tags en `infra-gitops`. Se observó en pam: CI promovió
+antes que la transacción, que encontró el trabajo ya hecho.
+
+Ese resultado fue correcto por suerte. El caso real es peor: el upgrade falla,
+revierte, y minutos después CI termina y **vuelve a promover la versión que el
+rollback acaba de retirar**.
+
+Regla: los commits de sync de un upgrade llevan `[skip ci]`. La transacción es la
+única que construye y promueve. CI queda para los push directos al repo
+standalone, que es el flujo `custom`.
+
 ### 7. Migraciones: expand/contract, nunca destructivas en el mismo release
 
 El rollback de código es exacto; el de esquema no lo es. Por eso las migraciones

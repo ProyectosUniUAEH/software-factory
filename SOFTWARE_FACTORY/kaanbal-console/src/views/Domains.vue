@@ -72,6 +72,9 @@
               <p class="font-mono text-xs text-slate-500 break-all">
                 zone {{ domain.cloudflare_zone_id || '—' }} · tunnel {{ domain.tunnel_id || '—' }}
               </p>
+              <p v-if="domain.apex && domain.apex.routed === false" class="text-xs text-amber-300 mt-1 max-w-2xl">
+                ⚠ {{ domain.apex.reason }}
+              </p>
             </div>
           </div>
 
@@ -340,7 +343,11 @@ const createDomain = async () => {
       fqdn: newDomain.fqdn.trim().toLowerCase(),
       is_default: newDomain.is_default,
     })
-    showToast(`${data.fqdn} registrado y cableado`)
+    showToast(
+      data.apex?.routed === false
+        ? `${data.fqdn} registrado. La raíz apunta a otro origen y se respetó.`
+        : `${data.fqdn} registrado y cableado`
+    )
     showAddModal.value = false
     await loadDomains()
   } catch (e) {

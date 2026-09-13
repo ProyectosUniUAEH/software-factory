@@ -116,7 +116,7 @@ async def create_domain(domain_data: DomainCreate):
     try:
         provisioned = await domain_service.provision(fqdn, zone_id=zone_id, tunnel_id=tunnel_id)
     except domain_service.DomainError as exc:
-        raise HTTPException(status_code=502, detail=str(exc))
+        raise HTTPException(status_code=424, detail=str(exc))
 
     total = await db.domains.count_documents({})
     is_default = domain_data.is_default or total == 0
@@ -130,6 +130,8 @@ async def create_domain(domain_data: DomainCreate):
         "is_default": is_default,
         "client_id": domain_data.client_id,
         "status": "active",
+        # Si la raíz apunta a otro origen se respetó; la consola lo muestra.
+        "apex": provisioned.get("apex") or {"routed": True},
         "verified_at": datetime.utcnow(),
         "created_at": datetime.utcnow(),
     }
@@ -194,12 +196,13 @@ async def repair_domain(domain_id: str):
             domain["fqdn"], zone_id=zone_id, tunnel_id=tunnel_id,
         )
     except domain_service.DomainError as exc:
-        raise HTTPException(status_code=502, detail=str(exc))
+        raise HTTPException(status_code=424, detail=str(exc))
 
     await db.domains.update_one(
         {"_id": oid},
         {"$set": {
             "status": "active",
+            "apex": provisioned.get("apex") or {"routed": True},
             "cloudflare_zone_id": zone_id,
             "tunnel_id": tunnel_id,
             "verified_at": datetime.utcnow(),
@@ -277,7 +280,7 @@ async def delete_domain(domain_id: str):
         )
     except Exception as exc:
         raise HTTPException(
-            status_code=502,
+            status_code=424,
             detail=f"No se pudo retirar la configuración en Cloudflare: {exc}",
         )
 

@@ -25,8 +25,42 @@ CF_API = "https://api.cloudflare.com/client/v4"
 TRAEFIK_SERVICE = "http://traefik.kube-system.svc.cluster.local:80"
 
 
+TUNNEL_SUFFIX = ".cfargotunnel.com"
+
+
 class DomainError(Exception):
     """Fallo de validacion o provision de un dominio."""
+
+
+async def _records(client: httpx.AsyncClient, token: str, zone_id: str, name: str) -> List[Dict[str, Any]]:
+    resp = await client.get(
+        f"{CF_API}/zones/{zone_id}/dns_records?name={name}", headers=_headers(token),
+    )
+    return resp.json().get("result", []) if resp.status_code == 200 else []
+
+
+def _points_to_tunnel(record: Dict[str, Any]) -> bool:
+    return record.get("type") == "CNAME" and str(record.get("content") or "").endswith(TUNNEL_SUFFIX)
+
+
+def _describe(records: List[Dict[str, Any]]) -> str:
+    return ", ".join(f"{r.get('type')} {r.get('content')}" for r in records)
+
+
+async def dns_conflicts(client: httpx.AsyncClient, token: str, zone_id: str, fqdn: str) -> Dict[str, Any]:
+    """Registros en la raiz y el wildcard que apuntan a algo que no es un tunel.
+
+    Al agregar una zona, Cloudflare importa el DNS que tenia el registrador. Un
+    A en la raiz hacia el hosting es lo normal, y Cloudflare rechaza un CNAME en
+    un nombre que ya tiene A/AAAA/CNAME (codigo 81053).
+    """
+    def foreign(records):
+        return [r for r in records if r.get("type") in ("A", "AAAA", "CNAME") and not _points_to_tunnel(r)]
+
+    return {
+        "wildcard": foreign(await _records(client, token, zone_id, f"*.{fqdn}")),
+        "apex": foreign(await _records(client, token, zone_id, fqdn)),
+    }
 
 
 def _headers(token: str) -> Dict[str, str]:
@@ -219,6 +253,24 @@ async def verify(fqdn: str, *, tunnel_id: str = "") -> Dict[str, Any]:
                 f"la propagacion puede tardar de minutos a horas. {nudge}".strip(),
             ))
 
+        conflicts = await dns_conflicts(client, token, zone_id, fqdn)
+        if conflicts["wildcard"]:
+            checks.append(_check(
+                "dns", "DNS existente", "fail",
+                f"*.{fqdn} ya apunta a otro origen ({_describe(conflicts['wildcard'])}). "
+                "Eliminalo en Cloudflare para que las apps en subdominios usen el tunel.",
+            ))
+        elif conflicts["apex"]:
+            checks.append(_check(
+                "dns", "DNS existente", "warn",
+                f"La raiz {fqdn} apunta a otro origen ({_describe(conflicts['apex'])}). "
+                "No se tocara: las apps en subdominios funcionaran y la raiz seguira "
+                "sirviendo lo que tiene hoy. Si quieres usar la raiz, elimina ese "
+                "registro en Cloudflare y usa Recablear.",
+            ))
+        else:
+            checks.append(_check("dns", "DNS existente", "ok", "Sin registros en conflicto."))
+
         if zone_account and account_id and zone_account != account_id:
             checks.append(_check(
                 "account", "Cuenta propietaria", "fail",
@@ -290,6 +342,19 @@ async def provision(fqdn: str, *, zone_id: str, tunnel_id: str) -> Dict[str, Any
 
     created: List[str] = []
     async with httpx.AsyncClient(timeout=30) as client:
+        # Conflictos ANTES de tocar el tunel: descubrirlos a mitad de camino deja
+        # el dominio a medio cablear.
+        conflicts = await dns_conflicts(client, token, zone_id, fqdn)
+        if conflicts["wildcard"]:
+            raise DomainError(
+                f"*.{fqdn} ya apunta a otro origen ({_describe(conflicts['wildcard'])}). "
+                "Eliminalo en Cloudflare para que las apps en subdominios usen el tunel."
+            )
+        # La raiz es opcional: las apps viven en subdominios. Si ya apunta a otro
+        # origen (tipico: el hosting del registrador) se respeta en vez de pisar
+        # un sitio que puede estar funcionando.
+        apex_routed = not conflicts["apex"]
+
         cfg_url = f"{CF_API}/accounts/{account_id}/cfd_tunnel/{tunnel_id}/configurations"
         cur_resp = await client.get(cfg_url, headers=_headers(token))
         if cur_resp.status_code != 200:
@@ -297,53 +362,77 @@ async def provision(fqdn: str, *, zone_id: str, tunnel_id: str) -> Dict[str, Any
                 f"No se pudo leer la configuracion del tunel (HTTP {cur_resp.status_code})."
             )
         tunnel_cfg = (cur_resp.json().get("result") or {}).get("config") or {}
-        ingress = list(tunnel_cfg.get("ingress") or [])
+        original_ingress = list(tunnel_cfg.get("ingress") or [])
 
-        existing_hosts = {rule.get("hostname") for rule in ingress if rule.get("hostname")}
-        new_rules = [
-            {"hostname": f"*.{fqdn}", "service": TRAEFIK_SERVICE},
-            {"hostname": fqdn, "service": TRAEFIK_SERVICE},
+        existing_hosts = {r.get("hostname") for r in original_ingress if r.get("hostname")}
+        wanted = [f"*.{fqdn}"] + ([fqdn] if apex_routed else [])
+        additions = [
+            {"hostname": host, "service": TRAEFIK_SERVICE}
+            for host in wanted if host not in existing_hosts
         ]
-        additions = [r for r in new_rules if r["hostname"] not in existing_hosts]
 
-        if additions:
-            # El catch-all (regla sin hostname) tiene que quedar al final o
-            # Cloudflare rechaza la configuracion completa.
-            catch_all = [r for r in ingress if not r.get("hostname")]
-            routed = [r for r in ingress if r.get("hostname")]
-            tunnel_cfg["ingress"] = routed + additions + (catch_all or [{"service": "http_status:404"}])
-            put_resp = await client.put(cfg_url, headers=_headers(token), json={"config": tunnel_cfg})
-            if put_resp.status_code != 200:
-                raise DomainError(
-                    f"No se pudieron agregar las reglas del tunel "
-                    f"(HTTP {put_resp.status_code}): {put_resp.text[:200]}"
-                )
-            created.extend(r["hostname"] for r in additions)
+        tunnel_changed = False
+        created_record_ids: List[str] = []
+        try:
+            if additions:
+                # El catch-all (regla sin hostname) tiene que quedar al final o
+                # Cloudflare rechaza la configuracion completa.
+                catch_all = [r for r in original_ingress if not r.get("hostname")]
+                routed = [r for r in original_ingress if r.get("hostname")]
+                tunnel_cfg["ingress"] = routed + additions + (catch_all or [{"service": "http_status:404"}])
+                put_resp = await client.put(cfg_url, headers=_headers(token), json={"config": tunnel_cfg})
+                if put_resp.status_code != 200:
+                    raise DomainError(
+                        f"No se pudieron agregar las reglas del tunel "
+                        f"(HTTP {put_resp.status_code}): {put_resp.text[:200]}"
+                    )
+                tunnel_changed = True
+                created.extend(r["hostname"] for r in additions)
 
-        target = f"{tunnel_id}.cfargotunnel.com"
-        for name in [f"*.{fqdn}", fqdn]:
-            record = {"type": "CNAME", "name": name, "content": target, "proxied": True}
-            ex_resp = await client.get(
-                f"{CF_API}/zones/{zone_id}/dns_records?type=CNAME&name={name}",
-                headers=_headers(token),
-            )
-            existing = ex_resp.json().get("result", []) if ex_resp.status_code == 200 else []
-            if existing:
-                await client.put(
-                    f"{CF_API}/zones/{zone_id}/dns_records/{existing[0]['id']}",
-                    headers=_headers(token), json=record,
+            target = f"{tunnel_id}{TUNNEL_SUFFIX}"
+            for name in wanted:
+                record = {"type": "CNAME", "name": name, "content": target, "proxied": True}
+                existing = [r for r in await _records(client, token, zone_id, name) if _points_to_tunnel(r)]
+                if existing:
+                    await client.put(
+                        f"{CF_API}/zones/{zone_id}/dns_records/{existing[0]['id']}",
+                        headers=_headers(token), json=record,
+                    )
+                else:
+                    cr = await client.post(
+                        f"{CF_API}/zones/{zone_id}/dns_records",
+                        headers=_headers(token), json=record,
+                    )
+                    if cr.status_code != 200:
+                        errors = cr.json().get("errors") or []
+                        msg = errors[0].get("message") if errors else cr.text[:200]
+                        raise DomainError(f"No se pudo crear el DNS {name}: {msg}")
+                    created_record_ids.append((cr.json().get("result") or {}).get("id"))
+                created.append(name)
+        except Exception:
+            # Revertir solo lo que esta llamada creo; lo que ya existia se queda.
+            if tunnel_changed:
+                tunnel_cfg["ingress"] = original_ingress
+                await client.put(cfg_url, headers=_headers(token), json={"config": tunnel_cfg})
+            for record_id in filter(None, created_record_ids):
+                await client.delete(
+                    f"{CF_API}/zones/{zone_id}/dns_records/{record_id}", headers=_headers(token),
                 )
-            else:
-                cr = await client.post(
-                    f"{CF_API}/zones/{zone_id}/dns_records",
-                    headers=_headers(token), json=record,
-                )
-                if cr.status_code != 200:
-                    raise DomainError(f"No se pudo crear el DNS {name}: {cr.text[:200]}")
-            created.append(name)
+            logger.warning("Provision de %s revertida tras un fallo", fqdn)
+            raise
 
-    logger.info("Domain %s provisioned on tunnel %s", fqdn, tunnel_id)
-    return {"fqdn": fqdn, "zone_id": zone_id, "tunnel_id": tunnel_id, "provisioned": created}
+    apex = {"routed": apex_routed}
+    if not apex_routed:
+        apex["reason"] = (
+            f"La raiz {fqdn} apunta a otro origen ({_describe(conflicts['apex'])}) y se "
+            "respeto. Las apps en subdominios funcionan; la raiz sigue sirviendo lo que "
+            "tiene hoy."
+        )
+    logger.info("Domain %s provisioned on tunnel %s (apex routed=%s)", fqdn, tunnel_id, apex_routed)
+    return {
+        "fqdn": fqdn, "zone_id": zone_id, "tunnel_id": tunnel_id,
+        "provisioned": created, "apex": apex,
+    }
 
 
 async def deprovision(fqdn: str, *, zone_id: str, tunnel_id: str) -> Dict[str, Any]:

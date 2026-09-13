@@ -223,6 +223,87 @@ class ProvisionTests(unittest.TestCase):
         self.assertEqual(tunnel_puts, [])
 
 
+class DnsAwareClient(FakeClient):
+    """Cliente con registros DNS por nombre y fallos de creacion inyectables."""
+
+    def __init__(self, tunnel_ingress, records_by_name=None, fail_create=False):
+        super().__init__(tunnel_ingress)
+        self.records_by_name = records_by_name or {}
+        self.fail_create = fail_create
+        self.deleted = []
+
+    async def get(self, url, **kw):
+        if "configurations" in url:
+            return FakeResponse({"result": {"config": {"ingress": self.tunnel_ingress}}})
+        if "dns_records?name=" in url:
+            name = url.split("dns_records?name=", 1)[1]
+            return FakeResponse({"result": self.records_by_name.get(name, [])})
+        return FakeResponse({"result": []})
+
+    async def post(self, url, **kw):
+        self.posted.append(kw.get("json"))
+        if self.fail_create:
+            return FakeResponse({"errors": [{"code": 81053, "message": "record exists"}]}, 400)
+        return FakeResponse({"result": {"id": f"rec-{len(self.posted)}"}})
+
+    async def delete(self, url, **kw):
+        self.deleted.append(url)
+        return FakeResponse({"result": {}})
+
+
+class ProvisionConflictTests(unittest.TestCase):
+    BASE = [
+        {"hostname": "*.instalacion.com", "service": ds.TRAEFIK_SERVICE},
+        {"service": "http_status:404"},
+    ]
+
+    def _run(self, client):
+        db = FakeDB(system_config=CONFIG)
+        with mock.patch.object(ds, "get_db", return_value=db), \
+             mock.patch.object(ds.httpx, "AsyncClient", return_value=client):
+            return run(ds.provision("nuevo.com", zone_id="zone-nuevo", tunnel_id="tunnel-1"))
+
+    def test_apex_pointing_to_registrar_hosting_is_respected(self):
+        """El caso real de pam: A de Hostinger en la raiz. Pisarlo tumbaria un sitio vivo."""
+        client = DnsAwareClient(list(self.BASE), {
+            "nuevo.com": [{"type": "A", "content": "2.57.91.91", "id": "hostinger"}],
+        })
+        result = self._run(client)
+        self.assertFalse(result["apex"]["routed"])
+        self.assertIn("2.57.91.91", result["apex"]["reason"])
+        created_names = [p["name"] for p in client.posted]
+        self.assertEqual(created_names, ["*.nuevo.com"])
+        hostnames = [r.get("hostname") for r in client.put_bodies[0]["config"]["ingress"]]
+        self.assertIn("*.nuevo.com", hostnames)
+        self.assertNotIn("nuevo.com", hostnames)
+
+    def test_foreign_wildcard_blocks_before_touching_the_tunnel(self):
+        client = DnsAwareClient(list(self.BASE), {
+            "*.nuevo.com": [{"type": "A", "content": "9.9.9.9", "id": "otro"}],
+        })
+        with self.assertRaises(ds.DomainError):
+            self._run(client)
+        self.assertEqual(client.put_bodies, [])
+        self.assertEqual(client.posted, [])
+
+    def test_dns_failure_rolls_back_tunnel_rules(self):
+        """Nunca dejar el dominio a medio cablear."""
+        client = DnsAwareClient(list(self.BASE), fail_create=True)
+        with self.assertRaises(ds.DomainError):
+            self._run(client)
+        self.assertEqual(len(client.put_bodies), 2)  # agregar + revertir
+        restored = client.put_bodies[-1]["config"]["ingress"]
+        self.assertEqual(restored, self.BASE)
+
+    def test_existing_tunnel_cname_is_updated_not_duplicated(self):
+        """Reintentar tras un fallo parcial reutiliza el wildcard ya creado."""
+        client = DnsAwareClient(list(self.BASE), {
+            "*.nuevo.com": [{"type": "CNAME", "content": "tunnel-1.cfargotunnel.com", "id": "w1"}],
+        })
+        self._run(client)
+        self.assertNotIn("*.nuevo.com", [p["name"] for p in client.posted])
+
+
 class VerifyTests(unittest.TestCase):
     def test_reports_missing_credentials_without_calling_cloudflare(self):
         db = FakeDB(system_config=[{"_id": "main", "domain": "x.com"}])

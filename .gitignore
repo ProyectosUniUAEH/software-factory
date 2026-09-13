@@ -62,3 +62,7 @@ vault-keys*
 *.tar
 *.zip
 *recovery*.json
+
+# Configuración por servidor (IPs, usuarios, notas de operación). Repo público:
+# nunca debe publicarse. Los secretos ya estaban cubiertos por *.env / *.key.
+env/

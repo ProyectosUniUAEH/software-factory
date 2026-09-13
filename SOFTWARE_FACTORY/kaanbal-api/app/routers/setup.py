@@ -1,6 +1,7 @@
 from fastapi import APIRouter, HTTPException, Depends
 from pydantic import BaseModel
 from typing import Optional
+from datetime import datetime
 import os
 import secrets
 import string
@@ -334,7 +335,13 @@ async def run_full_install(request: SetupInstallRequest):
     if request.core_release:
         # Reinstalar no debe borrar la procedencia si el instalador no la manda;
         # solo se pisa cuando viene una nueva.
-        config_update["core_release"] = request.core_release
+        config_update["core_release"] = {
+            "applied_by": "installer",
+            **request.core_release,
+            # Siempre la hora del servidor: es cuándo quedó aplicada, no cuándo
+            # la armó el instalador.
+            "applied_at": datetime.utcnow(),
+        }
     if request.domain:
         config_update["domain"] = request.domain
     if request.git_username:

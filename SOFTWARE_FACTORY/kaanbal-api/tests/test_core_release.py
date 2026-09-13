@@ -115,12 +115,32 @@ class CheckUpdatesTests(unittest.TestCase):
         self.assertNotIn("v1.1.0-rc1", versions)
         self.assertIn("v1.2.0", versions)
 
-    def test_prereleases_visible_on_dev_channel(self):
+    def _check_dev(self, upstream):
         config = dict(CONFIG_WITH_PROVENANCE)
         config["core_release"] = {**CONFIG_WITH_PROVENANCE["core_release"], "channel": "dev"}
-        got = self._check(config, RELEASES, {"detectable": True, "any_custom": False})
-        self.assertEqual(got["latest"]["version"], "v1.2.0")
-        self.assertIn("v1.1.0-rc1", [r["version"] for r in got["pending_releases"]])
+        db = FakeDB(config)
+        with mock.patch.object(cr, "get_db", return_value=db), \
+             mock.patch.object(cr, "upstream_commits", new=mock.AsyncMock(return_value=upstream)), \
+             mock.patch.object(cr, "detect_drift", new=mock.AsyncMock(return_value={"any_custom": False})):
+            return run(cr.check_updates())
+
+    def test_dev_channel_offers_upgrade_for_engine_commits(self):
+        """El flujo del autor: un commit al monorepo aparece como upgrade en su célula."""
+        got = self._check_dev({"available": True, "head_sha": "bbbbbbbcafe", "ahead_by": 2,
+                               "commits": [{"sha": "b"}, {"sha": "c"}],
+                               "components": ["kaanbal-api"], "touches_engine": True})
+        self.assertEqual(got["tracking"], "commits")
+        self.assertTrue(got["update_available"])
+        self.assertEqual(got["latest"]["version"], "dev-bbbbbbb")
+
+    def test_dev_channel_ignores_commits_that_only_touch_docs(self):
+        got = self._check_dev({"available": True, "head_sha": "ddddddd", "ahead_by": 1,
+                               "commits": [{"sha": "d"}], "components": [], "touches_engine": False})
+        self.assertFalse(got["update_available"])
+
+    def test_dev_channel_without_github_does_not_claim_an_update(self):
+        got = self._check_dev({"available": False, "reason": "Sin conexión con GitHub"})
+        self.assertFalse(got["update_available"])
 
     def test_up_to_date_cell_gets_no_update(self):
         config = dict(CONFIG_WITH_PROVENANCE)
@@ -140,6 +160,17 @@ class CheckUpdatesTests(unittest.TestCase):
         got = self._check(CONFIG_WITH_PROVENANCE, RELEASES, drift)
         self.assertTrue(got["update_available"])
         self.assertTrue(got["blocked_by_drift"])
+
+
+class ComponentMappingTests(unittest.TestCase):
+    def test_maps_engine_paths_to_components(self):
+        self.assertEqual(cr._component_of("SOFTWARE_FACTORY/kaanbal-api/app/main.py"), "kaanbal-api")
+        self.assertEqual(cr._component_of("SOFTWARE_FACTORY/installer/server.py"), "installer")
+        self.assertEqual(cr._component_of("SOFTWARE_FACTORY/infra-gitops/apps/x.yaml"), "infra-gitops")
+
+    def test_docs_and_env_are_not_engine(self):
+        for path in ("docs/adr/002.md", "README.md", ".gitignore", "SOFTWARE_FACTORY/BLUEPRINT.md"):
+            self.assertIsNone(cr._component_of(path), path)
 
 
 class DriftTests(unittest.TestCase):

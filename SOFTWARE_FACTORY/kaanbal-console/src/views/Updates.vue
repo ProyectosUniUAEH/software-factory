@@ -83,6 +83,59 @@
         <p class="text-emerald-300 font-medium">✅ Esta célula está al día.</p>
       </div>
 
+      <!-- Canal dev: commits pendientes del monorepo -->
+      <div v-if="data.tracking === 'commits'" class="glass-panel p-6 rounded-xl">
+        <div class="flex items-center justify-between gap-3 flex-wrap mb-4">
+          <h3 class="font-semibold text-white">Commits en software-factory</h3>
+          <span v-if="data.upstream?.head_sha" class="font-mono text-xs text-slate-500">
+            main @ {{ data.upstream.head_sha.slice(0, 7) }}
+          </span>
+        </div>
+
+        <p v-if="!data.upstream?.available" class="text-sm text-amber-300">
+          {{ data.upstream?.reason || 'No se pudo consultar GitHub.' }}
+        </p>
+        <p v-else-if="data.upstream.reason" class="text-sm text-amber-300 mb-3">{{ data.upstream.reason }}</p>
+        <p v-else-if="!data.upstream.commits?.length" class="text-sm text-slate-400">
+          Esta célula corre el último commit de main.
+        </p>
+
+        <template v-if="data.upstream?.commits?.length">
+          <p class="text-sm text-slate-300 mb-3">
+            {{ data.upstream.ahead_by }} commit(s) sin aplicar.
+            <span v-if="data.upstream.touches_engine">
+              Cambian: <span class="text-amber-300">{{ data.upstream.components.join(', ') }}</span>
+            </span>
+            <span v-else class="text-slate-500">Ninguno toca el engine: no hace falta actualizar.</span>
+          </p>
+          <div class="space-y-2 max-h-72 overflow-y-auto">
+            <a
+              v-for="c in data.upstream.commits"
+              :key="c.sha"
+              :href="c.url"
+              target="_blank"
+              rel="noopener"
+              class="flex items-start gap-3 text-sm rounded-lg px-2 py-1.5 hover:bg-white/5"
+            >
+              <span class="font-mono text-xs bg-slate-800 px-2 py-0.5 rounded text-slate-300 shrink-0">{{ c.sha.slice(0, 7) }}</span>
+              <span class="min-w-0">
+                <span class="text-slate-200 break-words">{{ c.message }}</span>
+                <span class="block text-xs text-slate-500">{{ c.author }} · {{ c.date ? new Date(c.date).toLocaleString() : '' }}</span>
+              </span>
+            </a>
+          </div>
+
+          <div v-if="data.update_available" class="mt-5 pt-4 border-t border-white/10">
+            <p class="text-sm font-medium text-slate-200">Cómo aplicarlos</p>
+            <p class="text-xs text-slate-400 mt-1">
+              Por ahora el upgrade se ejecuta en el nodo. Construye, promueve, verifica que los pods
+              arranquen y revierte solo si algo falla. Tus apps y datos no se tocan.
+            </p>
+            <pre class="mt-3 text-xs bg-slate-950/80 border border-white/10 rounded-lg p-3 overflow-x-auto text-emerald-300">{{ upgradeCommand }}</pre>
+          </div>
+        </template>
+      </div>
+
       <!-- Historial -->
       <div v-if="data.pending_releases?.length" class="glass-panel p-6 rounded-xl">
         <h3 class="font-semibold text-white mb-4">Cambios pendientes de aplicar</h3>
@@ -119,6 +172,8 @@ const channelClass = computed(() => ({
 }[data.value?.channel] || 'bg-slate-500/20 text-slate-300'))
 
 const driftFor = (name) => data.value?.drift?.components?.[name]
+
+const upgradeCommand = 'sudo KAANBAL_ORG=<tu-org> bash ~/kaanbal-source/SOFTWARE_FACTORY/tools/core-upgrade.sh --ref main'
 
 const load = async () => {
   loading.value = true

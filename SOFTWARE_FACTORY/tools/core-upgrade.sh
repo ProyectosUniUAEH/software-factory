@@ -15,11 +15,12 @@
 #   sudo KAANBAL_ORG=<org> bash core-upgrade.sh --ref main
 #   sudo KAANBAL_ORG=<org> bash core-upgrade.sh --phase build
 #   sudo bash core-upgrade.sh --snapshot
-#   sudo KAANBAL_ORG=<org> bash core-upgrade.sh --rollback
+#   sudo KAANBAL_ORG=<org> bash core-upgrade.sh --rollback <api_tag> <console_tag>
 set -euo pipefail
 
 NS=prod
-SOURCE_DIR=${KAANBAL_SOURCE:-/home/pam/kaanbal-source}
+# El checkout del monorepo es donde vive este script (tools/ → SOFTWARE_FACTORY → raíz).
+SOURCE_DIR=${KAANBAL_SOURCE:-$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)}
 COMPONENTS=(kaanbal-api kaanbal-console)
 KANIKO_IMAGE=gcr.io/kaniko-project/executor:v1.24.0
 GIT_SECRET=kaanbal-build-git
@@ -29,6 +30,7 @@ VERIFY_TIMEOUT=${VERIFY_TIMEOUT:-420}
 
 REF=main
 PHASE=all
+ORIGINAL_ARGS=("$@")
 
 while (($#)); do
   case "$1" in
@@ -36,7 +38,7 @@ while (($#)); do
     --source) shift; SOURCE_DIR="${1:?--source necesita una ruta}" ;;
     --phase) shift; PHASE="${1:?--phase necesita sync|build|promote|verify|all}" ;;
     --snapshot) PHASE=snapshot ;;
-    --rollback) PHASE=rollback ;;
+    --rollback) PHASE=rollback; ROLLBACK_API="${2:-}"; ROLLBACK_CONSOLE="${3:-}"; shift 2 || true ;;
     *) echo "Argumento desconocido: $1" >&2; exit 2 ;;
   esac
   shift || true
@@ -102,35 +104,43 @@ sys.exit(0 if corebuild.image_exists(user, repo, tag, password) else 1)
 ' "$repo" "$tag" "$DOCKER_USER"
 }
 
-# ── Promoción: un solo commit para todos los componentes ─────────────────────
-# Un commit por componente daría ventanas donde corren versiones mezcladas.
-promote() {
-  local mode=$1 W
+# Tag que corre hoy cada Deployment. Es el punto de retorno del rollback.
+running_tag() {
+  kubectl get deploy "$1" -n "$NS" -o jsonpath='{.spec.template.spec.containers[0].image}' | awk -F: '{print $NF}'
+}
+
+desired_pairs() {
+  local c
+  for c in "${COMPONENTS[@]}"; do printf '%s=%s\n' "$c" "$(component_tag "$c")"; done
+}
+
+# ── Promoción: escribe tags explícitos en un solo commit ─────────────────────
+# Un commit por componente daría ventanas con versiones mezcladas. Y el rollback
+# escribe los tags anteriores en vez de hacer `git revert HEAD`: el último commit
+# de infra-gitops puede ser de otro (el deploy de una app) y revertirlo desharía
+# trabajo ajeno.
+promote_tags() {
+  local message=$1; shift
+  local W pair c tag f
   W=$(mktemp -d)
   git clone --quiet "https://x-access-token:$TOKEN@github.com/$ORG/infra-gitops.git" "$W/repo"
   cd "$W/repo"
   git config user.email "kaanbal@localhost"
   git config user.name "Kaanbal Upgrade"
 
-  if [[ "$mode" == revert ]]; then
-    git revert --no-edit HEAD >/dev/null || { cd /; rm -rf "$W"; die "No se pudo revertir el último commit de infra-gitops"; }
-  else
-    local c tag f
-    for c in "${COMPONENTS[@]}"; do
-      tag=$(component_tag "$c")
-      f="apps/$c/overlays/prod/kustomization.yaml"
-      [[ -f "$f" ]] || { cd /; rm -rf "$W"; die "No existe $f en infra-gitops"; }
-      sed -i "s|^\( *newTag:\).*|\1 $tag|" "$f"
-      log "  $c → $tag"
-    done
-    git add -A
-    if git diff --cached --quiet; then
-      log "infra-gitops ya apunta a estos tags"
-      cd /; rm -rf "$W"; return 0
-    fi
-    git commit --quiet -m "upgrade: promover core del monorepo@${UPSTREAM:0:7}"
+  for pair in "$@"; do
+    c=${pair%%=*}; tag=${pair#*=}
+    f="apps/$c/overlays/prod/kustomization.yaml"
+    [[ -f "$f" ]] || { cd /; rm -rf "$W"; die "No existe $f en infra-gitops"; }
+    sed -i "s|^\( *newTag:\).*|\1 $tag|" "$f"
+    log "  $c → $tag"
+  done
+  git add -A
+  if git diff --cached --quiet; then
+    log "infra-gitops ya apunta a estos tags"
+    cd /; rm -rf "$W"; return 0
   fi
-
+  git commit --quiet -m "$message [skip ci]"
   git push --quiet origin HEAD:main
   cd /; rm -rf "$W"
 
@@ -142,12 +152,49 @@ promote() {
   done
 }
 
+# ── Procedencia: la célula registra qué commit quedó aplicado ────────────────
+# Se escribe solo tras verificar. Sin esto la consola seguiría ofreciendo como
+# pendientes commits que ya están corriendo.
+record_provenance() {
+  local upstream=$1 api_tag console_tag api_sha console_sha
+  api_tag=$(component_tag kaanbal-api); console_tag=$(component_tag kaanbal-console)
+  api_sha=$(git ls-remote "https://x-access-token:$TOKEN@github.com/$ORG/kaanbal-api.git" refs/heads/main | cut -f1)
+  console_sha=$(git ls-remote "https://x-access-token:$TOKEN@github.com/$ORG/kaanbal-console.git" refs/heads/main | cut -f1)
+  local out
+  if ! out=$(kubectl exec -n "$NS" deploy/kaanbal-api -- python -c '
+import asyncio, sys
+from app import db as dbmod
+from app.services import core_release
+upstream, api_tag, api_sha, console_tag, console_sha, docker_user = sys.argv[1:7]
+async def main():
+    await dbmod.connect_db()
+    current = await core_release.read_provenance()
+    components = dict(current.get("components") or {})
+    components["kaanbal-api"] = {"image": f"{docker_user}/kaanbal-api", "tag": api_tag, "repo_sha": api_sha}
+    components["kaanbal-console"] = {"image": f"{docker_user}/kaanbal-console", "tag": console_tag, "repo_sha": console_sha}
+    await core_release.write_provenance(
+        version=f"dev-{upstream[:7]}", upstream_sha=upstream, components=components,
+        channel="dev", applied_by="core-upgrade.sh",
+    )
+    print("procedencia:", f"dev-{upstream[:7]}")
+asyncio.run(main())
+' "$upstream" "$api_tag" "$api_sha" "$console_tag" "$console_sha" "$DOCKER_USER" 2>&1); then
+    warn "El upgrade quedó aplicado pero no se pudo registrar la procedencia:"
+    printf '%s\n' "$out" | tail -5 | sed 's/^/    /' >&2
+    return 0
+  fi
+  printf '%s\n' "$out" | grep -v "Connected to MongoDB" | sed 's/^/  /'
+}
+
 # ── Verificación: la imagen debe llegar Y el pod quedar listo ────────────────
+# Recibe pares componente=tag: tras un rollback lo esperado son los tags viejos,
+# no los del repo. Compararlos contra lo nuevo reportaría fallo justo cuando el
+# rollback funcionó.
 verify() {
-  local deadline=$((SECONDS + VERIFY_TIMEOUT)) c want ok=1
+  local deadline=$((SECONDS + VERIFY_TIMEOUT)) pair c want ok=1
   local got=""
-  for c in "${COMPONENTS[@]}"; do
-    want=$(component_tag "$c")
+  for pair in "$@"; do
+    c=${pair%%=*}; want=${pair#*=}
     got=""
     log "Esperando $c → $want"
     while ((SECONDS < deadline)); do
@@ -171,10 +218,13 @@ verify() {
 }
 
 if [[ "$PHASE" == rollback ]]; then
-  log "Revirtiendo el último commit de infra-gitops"
-  UPSTREAM=""
-  promote revert
-  log "Revertido. ArgoCD volverá a la imagen anterior; las imágenes siguen publicadas."
+  # --rollback api_tag console_tag: los tags que imprime el snapshot de cada upgrade.
+  [[ -n "${ROLLBACK_API:-}" && -n "${ROLLBACK_CONSOLE:-}" ]] \
+    || die "Uso: --rollback <api_tag> <console_tag> (los imprime el snapshot del upgrade)"
+  log "Restaurando api=$ROLLBACK_API console=$ROLLBACK_CONSOLE"
+  pairs=("kaanbal-api=$ROLLBACK_API" "kaanbal-console=$ROLLBACK_CONSOLE")
+  promote_tags "rollback: restaurar core" "${pairs[@]}"
+  verify "${pairs[@]}" && log "✅ Rollback verificado." || die "El rollback no verifica. Revisa 'kubectl get pods -n $NS'."
   exit 0
 fi
 
@@ -182,10 +232,20 @@ fi
 UPSTREAM=""
 if [[ "$PHASE" == all || "$PHASE" == sync ]]; then
   [[ -d "$SOURCE_DIR/SOFTWARE_FACTORY" ]] || die "No hay checkout del monorepo en $SOURCE_DIR"
-  log "Actualizando el checkout a $REF"
-  git -C "$SOURCE_DIR" fetch --depth 50 origin "$REF" >/dev/null 2>&1
-  git -C "$SOURCE_DIR" checkout --quiet --detach FETCH_HEAD
-  UPSTREAM=$(git -C "$SOURCE_DIR" rev-parse HEAD)
+  # El checkout reescribe este mismo archivo mientras bash lo ejecuta, y bash lee
+  # los scripts por tramos: seguiría leyendo el archivo nuevo desde un offset del
+  # viejo. Todo el bloque se parsea antes de correr y termina en `exec` de la
+  # versión recién descargada, así que el upgrade corre con la lógica más nueva.
+  if [[ -z "${KAANBAL_UPGRADE_REEXEC:-}" ]]; then
+    log "Actualizando el checkout a $REF"
+    git -c safe.directory="$SOURCE_DIR" -C "$SOURCE_DIR" fetch --depth 50 origin "$REF" >/dev/null 2>&1 \
+      || die "No se pudo descargar $REF del monorepo"
+    git -c safe.directory="$SOURCE_DIR" -C "$SOURCE_DIR" checkout --quiet --detach FETCH_HEAD \
+      || die "No se pudo actualizar el checkout"
+    export KAANBAL_UPGRADE_REEXEC=1 KAANBAL_SOURCE="$SOURCE_DIR"
+    exec bash "$SOURCE_DIR/SOFTWARE_FACTORY/tools/core-upgrade.sh" "${ORIGINAL_ARGS[@]}"
+  fi
+  UPSTREAM=$(git -c safe.directory="$SOURCE_DIR" -C "$SOURCE_DIR" rev-parse HEAD)
   log "Monorepo en ${UPSTREAM:0:7}"
 
   POD=$(kubectl get pod -n "$NS" -l app=kaanbal-api -o jsonpath='{.items[0].metadata.name}')
@@ -337,16 +397,27 @@ fi
 
 # ── Promote + verify, con rollback automático ────────────────────────────────
 if [[ "$PHASE" == all || "$PHASE" == promote ]]; then
-  log "Promoviendo tags en infra-gitops"
-  promote apply
+  before=()
+  for c in "${COMPONENTS[@]}"; do before+=("$c=$(running_tag "$c")"); done
+  mapfile -t wanted < <(desired_pairs)
+  (( ${#wanted[@]} == ${#COMPONENTS[@]} )) || die "No se pudieron resolver los tags de todos los componentes"
 
-  if verify; then
+  log "Promoviendo tags en infra-gitops"
+  promote_tags "upgrade: promover core del monorepo@${UPSTREAM:0:7}" "${wanted[@]}"
+
+  if verify "${wanted[@]}"; then
     log "✅ Upgrade verificado."
+    if [[ -n "$UPSTREAM" ]]; then
+      record_provenance "$UPSTREAM"
+    else
+      UPSTREAM=$(git -c safe.directory="$SOURCE_DIR" -C "$SOURCE_DIR" rev-parse HEAD 2>/dev/null || true)
+      [[ -n "$UPSTREAM" ]] && record_provenance "$UPSTREAM"
+    fi
     snapshot | sed 's/^/  /'
   else
-    warn "La verificación falló — revirtiendo automáticamente"
-    promote revert
-    if verify; then
+    warn "La verificación falló — restaurando ${before[*]}"
+    promote_tags "rollback: el upgrade a monorepo@${UPSTREAM:0:7} no verificó" "${before[@]}"
+    if verify "${before[@]}"; then
       die "Se revirtió a la versión anterior y quedó sana. Revisa los logs del build."
     fi
     die "Rollback aplicado pero la célula no verifica. Revisa 'kubectl get pods -n $NS'."
@@ -354,5 +425,7 @@ if [[ "$PHASE" == all || "$PHASE" == promote ]]; then
 fi
 
 if [[ "$PHASE" == verify ]]; then
-  verify && log "✅ Verificado." || die "No verifica."
+  mapfile -t wanted < <(desired_pairs)
+  (( ${#wanted[@]} == ${#COMPONENTS[@]} )) || die "No se pudieron resolver los tags de todos los componentes"
+  verify "${wanted[@]}" && log "✅ Verificado." || die "No verifica."
 fi

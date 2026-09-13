@@ -117,6 +117,90 @@ async def list_releases(limit: int = 20) -> List[Dict[str, Any]]:
     return releases
 
 
+# Rutas del monorepo que cambian lo que corre una célula. Un commit que solo
+# toca docs/ no justifica un upgrade.
+ENGINE_PATHS = (
+    "SOFTWARE_FACTORY/kaanbal-api/",
+    "SOFTWARE_FACTORY/kaanbal-console/",
+    "SOFTWARE_FACTORY/kaanbal-agent/",
+    "SOFTWARE_FACTORY/kaanbal-templates/",
+    "SOFTWARE_FACTORY/infra-gitops/",
+    "SOFTWARE_FACTORY/installer/",
+    "SOFTWARE_FACTORY/tools/",
+)
+
+
+def _component_of(path: str) -> Optional[str]:
+    for prefix in ENGINE_PATHS:
+        if path.startswith(prefix):
+            return prefix.rstrip("/").split("/")[-1]
+    return None
+
+
+async def upstream_commits(base_sha: Optional[str], branch: str = "main") -> Dict[str, Any]:
+    """Commits de `branch` en el monorepo que esta célula todavía no aplicó.
+
+    Canal dev: una célula sigue commits, no releases. Se compara el commit del
+    que salió (procedencia) contra la punta de la rama, y se separa lo que toca
+    el engine de lo que no, para no sugerir un upgrade por un cambio en docs.
+    """
+    config = await _config()
+    token = config.get("github_token") or config.get("git_token") or ""
+    repo_url = f"{GITHUB_API}/repos/{UPSTREAM_OWNER}/{UPSTREAM_REPO}"
+    try:
+        async with httpx.AsyncClient(timeout=20) as client:
+            head_resp = await client.get(f"{repo_url}/commits/{branch}", headers=_gh_headers(token))
+            if head_resp.status_code != 200:
+                return {"available": False, "reason": f"GitHub respondió HTTP {head_resp.status_code}"}
+            head = head_resp.json()
+            head_sha = head["sha"]
+
+            if not base_sha:
+                return {
+                    "available": True, "head_sha": head_sha, "ahead_by": None,
+                    "commits": [], "components": [], "touches_engine": True,
+                    "reason": "Sin procedencia: no se sabe qué commits faltan.",
+                }
+            if base_sha == head_sha:
+                return {"available": True, "head_sha": head_sha, "ahead_by": 0,
+                        "commits": [], "components": [], "touches_engine": False}
+
+            cmp_resp = await client.get(f"{repo_url}/compare/{base_sha}...{head_sha}", headers=_gh_headers(token))
+            if cmp_resp.status_code != 200:
+                return {"available": False, "reason": f"No se pudo comparar {base_sha[:7]} con {branch}"}
+            cmp = cmp_resp.json()
+    except Exception as exc:
+        logger.warning("No se pudieron consultar commits upstream: %s", exc)
+        return {"available": False, "reason": "Sin conexión con GitHub"}
+
+    if cmp.get("status") in ("behind", "diverged"):
+        # La célula corre algo que main ya no contiene (rama, force-push). No se
+        # sugiere "actualizar" hacia atrás en silencio.
+        return {"available": True, "head_sha": head_sha, "ahead_by": cmp.get("ahead_by", 0),
+                "commits": [], "components": [], "touches_engine": False,
+                "reason": f"La célula corre un commit que no está en {branch} ({cmp.get('status')})."}
+
+    components = sorted({c for c in (_component_of(f.get("filename", "")) for f in cmp.get("files") or []) if c})
+    commits = [
+        {
+            "sha": item["sha"],
+            "message": (item["commit"]["message"] or "").splitlines()[0],
+            "author": (item["commit"].get("author") or {}).get("name"),
+            "date": (item["commit"].get("author") or {}).get("date"),
+            "url": item.get("html_url"),
+        }
+        for item in reversed(cmp.get("commits") or [])
+    ]
+    return {
+        "available": True,
+        "head_sha": head_sha,
+        "ahead_by": cmp.get("ahead_by", len(commits)),
+        "commits": commits,
+        "components": components,
+        "touches_engine": bool(components),
+    }
+
+
 async def detect_drift() -> Dict[str, Any]:
     """Componentes modificados localmente respecto a la release aplicada.
 
@@ -174,11 +258,30 @@ async def check_updates() -> Dict[str, Any]:
     que nadie lo intercepte.
     """
     provenance = await read_provenance()
-    releases = await list_releases()
     drift = await detect_drift()
-
     channel = provenance.get("channel") or CHANNEL_STABLE
-    candidates = [r for r in releases if channel == CHANNEL_DEV or not r["prerelease"]]
+
+    if channel == CHANNEL_DEV:
+        # dev sigue commits de main: cada commit que toca el engine es un upgrade
+        # posible. Así el autor valida en su propia célula antes de publicar una
+        # release para stable.
+        upstream = await upstream_commits(provenance.get("upstream_sha"))
+        update_available = bool(upstream.get("available") and upstream.get("touches_engine"))
+        return {
+            "current": provenance,
+            "channel": channel,
+            "tracking": "commits",
+            "upstream": upstream,
+            "latest": {"version": f"dev-{upstream['head_sha'][:7]}", "sha": upstream["head_sha"]}
+            if upstream.get("head_sha") else None,
+            "update_available": update_available,
+            "pending_releases": [],
+            "drift": drift,
+            "blocked_by_drift": bool(drift.get("any_custom")) and update_available,
+        }
+
+    releases = await list_releases()
+    candidates = [r for r in releases if not r["prerelease"]]
     latest = candidates[0] if candidates else None
 
     current_version = provenance.get("version")
@@ -199,12 +302,13 @@ async def check_updates() -> Dict[str, Any]:
 
     return {
         "current": provenance,
+        "channel": channel,
+        "tracking": "releases",
         "latest": latest,
         "update_available": update_available,
         "pending_releases": pending,
         "drift": drift,
         "blocked_by_drift": bool(drift.get("any_custom")) and update_available,
-        "channel": channel,
     }
 
 

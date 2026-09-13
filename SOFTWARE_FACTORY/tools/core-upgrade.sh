@@ -205,12 +205,32 @@ print(\"preflight ok\")
     rm -rf /tmp/pf /tmp/pf-main.py
   ' || die "El código nuevo no importa contra las dependencias reales. No se despliega nada."
 
-  # Deriva: nunca pisar código local en silencio.
+  # Deriva: nunca pisar código local en silencio. Se recorre desde HEAD: todo
+  # commit que aparezca antes del último commit propio (instalador o upgrade)
+  # es un cambio hecho a mano sobre el repo. Contar commits no sirve: cada
+  # upgrade suma uno y la guarda terminaría bloqueando siempre.
   for c in "${COMPONENTS[@]}"; do
-    count=$(curl -sf -H "Authorization: Bearer $TOKEN" \
-      "https://api.github.com/repos/$ORG/$c/commits?per_page=100" | grep -c '"sha"' || echo 0)
-    if [[ "$count" -gt 3 ]]; then
-      die "$ORG/$c tiene historia propia ($count commits): puede estar tuneado.
+    foreign=$(curl -sf -H "Authorization: Bearer $TOKEN" \
+      "https://api.github.com/repos/$ORG/$c/commits?per_page=100" | python3 -c '
+import json, sys
+OURS = ("bootstrap:", "upgrade: sync")
+try:
+    commits = json.load(sys.stdin)
+except ValueError:
+    print("?  no se pudo leer la historia"); sys.exit()
+found_ours = False
+for commit in commits:
+    message = commit["commit"]["message"]
+    if message.startswith(OURS):
+        found_ours = True
+        break
+    print(commit["sha"][:7], message.splitlines()[0][:70])
+if not found_ours:
+    print("?  ningún commit del instalador en los últimos 100: historia desconocida")
+') || die "No se pudo consultar la historia de $ORG/$c"
+    if [[ -n "$foreign" ]]; then
+      die "$ORG/$c tiene cambios hechos fuera de Kaanbal:
+$(printf '%s\n' "$foreign" | sed 's/^/       /')
      Resuelve la deriva antes de sobrescribirlo (ver ADR-002)."
     fi
   done

@@ -599,8 +599,11 @@ def upstream_sha():
     """
     repo_root = os.path.normpath(os.path.join(SF_ROOT, ".."))
     try:
+        # El instalador corre como root sobre un checkout de otro usuario; sin
+        # safe.directory git aborta con "dubious ownership" y la célula nacería
+        # sin procedencia.
         out = subprocess.run(
-            ["git", "-C", repo_root, "rev-parse", "HEAD"],
+            ["git", "-c", f"safe.directory={repo_root}", "-C", repo_root, "rev-parse", "HEAD"],
             capture_output=True, text=True, timeout=15,
         )
         return out.stdout.strip() if out.returncode == 0 else ""
@@ -2097,7 +2100,10 @@ def do_install(cfg):
             cfg["core_release"] = {
                 "version": core_version or (f"install-{_sha[:7]}" if _sha else "install-local"),
                 "upstream_sha": _sha or None,
-                "channel": "stable" if core_version else "custom",
+                # Sin versión fijada se construye desde el monorepo: es un build
+                # de desarrollo, no una célula tuneada. `custom` queda para cuando
+                # se detecta deriva.
+                "channel": "stable" if core_version else "dev",
                 "components": {
                     name: {
                         "image": f"{cfg.get('docker_user', '')}/{name}",

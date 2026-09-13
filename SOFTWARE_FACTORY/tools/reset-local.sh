@@ -59,6 +59,15 @@ elif command -v k3s >/dev/null 2>&1; then
   rm -rf /etc/rancher/k3s /var/lib/rancher/k3s
 fi
 
+# Desinstalar k3s destruye el PVC de Vault. Las claves de recuperación que se
+# conserven abrirían datos que ya no existen, y el bootstrap se negaría (con
+# razón) a inicializar un Vault nuevo mientras las vea. Se apartan al respaldo
+# en vez de borrarse: nunca se descarta material de recuperación.
+if $PRESERVE && [[ -f /etc/kaanbal/vault-recovery.json ]]; then
+  mv /etc/kaanbal/vault-recovery.json "$BACKUP/vault-recovery.orphaned.json"
+  log "Claves de Vault de la instalación anterior apartadas en ${BACKUP} (sus datos se eliminaron con k3s)"
+fi
+
 rm -rf /var/lib/kaanbal-installer /run/kaanbal-installer
 rm -rf /tmp/kaanbal-* /tmp/kaanbal-gitops
 rm -f "/etc/systemd/system/${SERVICE}.service"

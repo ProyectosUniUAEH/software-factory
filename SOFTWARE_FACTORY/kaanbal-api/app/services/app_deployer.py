@@ -1239,7 +1239,11 @@ class AppDeployer:
             ["git", "config", "user.email", f"kaanbal@{self.domain}"],
             ["git", "config", "user.name", "Kaanbal Engine"],
             ["git", "add", "."],
-            ["git", "commit", "-m", f"feat: Initial commit ({app_name})"],
+            # [skip ci]: este push ocurre antes de cargar los secrets del repo.
+            # En GitHub Actions el workflow corre en cuanto llega el push y fallaba
+            # con "Username and password required"; _trigger_initial_ci lanza el
+            # build de main a propósito cuando los secrets ya existen.
+            ["git", "commit", "-m", f"feat: Initial commit ({app_name}) [skip ci]"],
             ["git", "branch", "-M", "main"],
             ["git", "remote", "add", "origin", auth_repo_url],
         ]

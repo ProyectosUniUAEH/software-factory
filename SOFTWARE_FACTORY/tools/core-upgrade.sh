@@ -22,6 +22,9 @@ NS=prod
 # El checkout del monorepo es donde vive este script (tools/ → SOFTWARE_FACTORY → raíz).
 SOURCE_DIR=${KAANBAL_SOURCE:-$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)}
 COMPONENTS=(kaanbal-api kaanbal-console)
+# Se sincronizan desde el monorepo pero no tienen imagen: los templates base
+# viven aquí y la API refresca su catálogo desde este repo cada 5 minutos.
+SYNC_REPOS=("${COMPONENTS[@]}" kaanbal-templates)
 KANIKO_IMAGE=gcr.io/kaniko-project/executor:v1.24.0
 GIT_SECRET=kaanbal-build-git
 REGISTRY_SECRET=regcred
@@ -335,7 +338,7 @@ print(\"preflight ok\")
   # commit que aparezca antes del último commit propio (instalador o upgrade)
   # es un cambio hecho a mano sobre el repo. Contar commits no sirve: cada
   # upgrade suma uno y la guarda terminaría bloqueando siempre.
-  for c in "${COMPONENTS[@]}"; do
+  for c in "${SYNC_REPOS[@]}"; do
     foreign=$(curl -sf -H "Authorization: Bearer $TOKEN" \
       "https://api.github.com/repos/$ORG/$c/commits?per_page=100" | python3 -c '
 import json, sys
@@ -361,7 +364,7 @@ $(printf '%s\n' "$foreign" | sed 's/^/       /')
     fi
   done
 
-  for c in "${COMPONENTS[@]}"; do
+  for c in "${SYNC_REPOS[@]}"; do
     W=$(mktemp -d)
     git clone --quiet "https://x-access-token:$TOKEN@github.com/$ORG/$c.git" "$W/repo"
     find "$W/repo" -mindepth 1 -maxdepth 1 ! -name .git -exec rm -rf {} +

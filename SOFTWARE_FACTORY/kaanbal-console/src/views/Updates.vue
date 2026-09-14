@@ -14,7 +14,7 @@
 
     <!-- Progreso del upgrade: se lee del clúster, sobrevive a recargas y al reinicio de la API -->
     <div
-      v-if="upgrade && upgrade.exists && (upgradeRunning || upgradeJustFinished)"
+      v-if="upgrade && upgrade.exists"
       class="glass-panel p-6 rounded-xl"
       :class="{
         'border-sky-500/30': upgrade.state === 'running',
@@ -30,9 +30,16 @@
             'text-red-300': upgrade.state === 'failed',
           }">
             <span v-if="upgrade.state === 'running'">⏳ Actualizando la célula…</span>
-            <span v-else-if="upgrade.state === 'succeeded'">✅ Upgrade verificado</span>
-            <span v-else>❌ El upgrade falló</span>
+            <span v-else-if="upgrade.state === 'succeeded'">✅ Último update: verificado</span>
+            <span v-else>❌ Último update: falló</span>
           </h3>
+          <p v-if="upgrade.state !== 'running'" class="text-xs text-slate-400 mt-1">
+            {{ upgrade.ref ? `ref ${upgrade.ref}` : '' }}
+            <span v-if="upgrade.actor"> · por {{ upgrade.actor }}</span>
+            <span v-if="upgrade.finished_at || upgrade.started_at">
+              · {{ new Date(upgrade.finished_at || upgrade.started_at).toLocaleString() }}
+            </span>
+          </p>
           <p class="text-xs text-slate-400 mt-1">
             {{ currentStep }}
             <span v-if="connectionLost" class="text-amber-300">
@@ -48,15 +55,21 @@
         El detalle está en el log.
       </p>
 
-      <div v-if="upgrade.state === 'succeeded'" class="mt-3 flex items-center gap-3 flex-wrap">
+      <div v-if="upgrade.state === 'succeeded' && upgradeJustFinished" class="mt-3 flex items-center gap-3 flex-wrap">
         <p class="text-sm text-slate-300">La consola corre una versión nueva. Recárgala para verla.</p>
         <button @click="reloadPage" class="upgrade-button">Recargar consola</button>
       </div>
 
+      <!-- En curso o recién terminado: log a la vista. Histórico: plegado. -->
       <pre
+        v-if="upgradeRunning || upgradeJustFinished || upgrade.state === 'failed'"
         ref="logBox"
         class="mt-4 text-[11px] leading-relaxed bg-slate-950/80 border border-white/10 rounded-lg p-3 max-h-80 overflow-y-auto text-slate-300 whitespace-pre-wrap"
       >{{ upgrade.log || 'Esperando a que arranque el Job…' }}</pre>
+      <details v-else class="mt-3">
+        <summary class="text-xs text-slate-500 cursor-pointer">Ver log del último update</summary>
+        <pre class="mt-2 text-[11px] leading-relaxed bg-slate-950/80 border border-white/10 rounded-lg p-3 max-h-80 overflow-y-auto text-slate-300 whitespace-pre-wrap">{{ upgrade.log || 'El log ya no está disponible (se conserva 24 h).' }}</pre>
+      </details>
     </div>
 
     <template v-if="data">
@@ -313,13 +326,13 @@ const launchUpgrade = async () => {
 
 const reloadPage = () => window.location.reload()
 
-// Al entrar: si hay un upgrade en curso (por ejemplo, tras recargar la página
-// a mitad del proceso), se retoma su seguimiento.
+// Al entrar se muestra el resultado del último update. Si sigue en curso (por
+// ejemplo, tras recargar la página a mitad del proceso), se retoma el seguimiento.
 const resumeIfRunning = async () => {
   try {
     const { data: status } = await axios.get('/api/v1/core/upgrade')
+    if (status.exists) upgrade.value = status
     if (status.exists && status.state === 'running') {
-      upgrade.value = status
       startPolling()
       scrollLog()
     }

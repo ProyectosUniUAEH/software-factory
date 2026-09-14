@@ -201,6 +201,33 @@ async def upstream_commits(base_sha: Optional[str], branch: str = "main") -> Dic
     }
 
 
+# Repos standalone que el upgrade sobrescribe: si alguien los tunea, hay deriva.
+DRIFT_REPOS = CORE_COMPONENTS + ("kaanbal-templates",)
+
+# Commits que escribe Kaanbal. Misma definición que tools/core-upgrade.sh: si la
+# API y el script discreparan, la consola bloquearía upgrades que el script deja
+# pasar (o al revés).
+OWN_COMMIT_PREFIXES = ("bootstrap:", "upgrade: sync")
+
+
+def foreign_commits(commits: List[Dict[str, Any]]) -> List[Dict[str, str]]:
+    """Commits hechos fuera de Kaanbal sobre un repo standalone, desde HEAD.
+
+    Se recorre la historia hasta el último commit propio (instalador o upgrade);
+    todo lo que haya antes es un cambio a mano. Comparar HEAD contra la
+    procedencia no sirve: un upgrade interrumpido tras sincronizar mueve HEAD con
+    un commit propio y aparecería como "modificado localmente" sin serlo.
+    Una historia sin ningún commit propio es desconocida y cuenta como deriva.
+    """
+    foreign = []
+    for commit in commits:
+        message = ((commit.get("commit") or {}).get("message") or "")
+        if message.startswith(OWN_COMMIT_PREFIXES):
+            return foreign
+        foreign.append({"sha": (commit.get("sha") or "")[:7], "message": message.splitlines()[0][:80]})
+    return foreign or [{"sha": "?", "message": "sin commits de Kaanbal: historia desconocida"}]
+
+
 async def detect_drift() -> Dict[str, Any]:
     """Componentes modificados localmente respecto a la release aplicada.
 
@@ -225,25 +252,25 @@ async def detect_drift() -> Dict[str, Any]:
 
     components: Dict[str, Any] = {}
     async with httpx.AsyncClient(timeout=20) as client:
-        for name in CORE_COMPONENTS:
-            expected = (recorded.get(name) or {}).get("repo_sha")
-            url = f"{GITHUB_API}/repos/{org}/{name}/commits/main"
+        for name in DRIFT_REPOS:
+            url = f"{GITHUB_API}/repos/{org}/{name}/commits?per_page=100"
             try:
                 resp = await client.get(url, headers=_gh_headers(token))
-                head = resp.json().get("sha") if resp.status_code == 200 else None
+                commits = resp.json() if resp.status_code == 200 else None
             except Exception as exc:
                 logger.warning("drift check %s: %s", name, exc)
-                head = None
+                commits = None
 
-            if not head or not expected:
-                components[name] = {"custom": False, "head_sha": head, "expected_sha": expected,
-                                    "unknown": True}
+            if not isinstance(commits, list) or not commits:
+                components[name] = {"custom": False, "unknown": True, "foreign_commits": []}
                 continue
+            foreign = foreign_commits(commits)
             components[name] = {
-                "custom": head != expected,
-                "head_sha": head,
-                "expected_sha": expected,
+                "custom": bool(foreign),
                 "unknown": False,
+                "head_sha": commits[0].get("sha"),
+                "expected_sha": (recorded.get(name) or {}).get("repo_sha"),
+                "foreign_commits": foreign,
             }
 
     any_custom = any(c.get("custom") for c in components.values())

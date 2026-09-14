@@ -173,6 +173,34 @@ class ComponentMappingTests(unittest.TestCase):
             self.assertIsNone(cr._component_of(path), path)
 
 
+def _commit(sha, message):
+    return {"sha": sha, "commit": {"message": message}}
+
+
+class ForeignCommitsTests(unittest.TestCase):
+    def test_interrupted_upgrade_is_not_drift(self):
+        """El falso positivo de pam: el upgrade sincronizó y se cortó antes de
+        registrar la procedencia. HEAD es un commit propio, no un cambio a mano."""
+        commits = [
+            _commit("13b139d", "upgrade: sync desde software-factory@3f4833a [skip ci]"),
+            _commit("94595b1", "upgrade: sync desde software-factory@f86b784 [skip ci]"),
+            _commit("dce46db", "bootstrap: kaanbal-api publicado por el instalador"),
+        ]
+        self.assertEqual(cr.foreign_commits(commits), [])
+
+    def test_manual_commit_on_top_is_drift(self):
+        commits = [
+            _commit("aaa1111", "feat: tuneo local del deployer"),
+            _commit("13b139d", "upgrade: sync desde software-factory@3f4833a"),
+        ]
+        foreign = cr.foreign_commits(commits)
+        self.assertEqual([c["sha"] for c in foreign], ["aaa1111"])
+
+    def test_history_without_kaanbal_commits_is_drift(self):
+        foreign = cr.foreign_commits([_commit("zzz", "initial commit")])
+        self.assertTrue(foreign)
+
+
 class DriftTests(unittest.TestCase):
     def test_not_detectable_without_provenance(self):
         db = FakeDB({"_id": "main", "github_org": "org", "github_token": "t"})

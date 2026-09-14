@@ -71,6 +71,17 @@
             <path stroke-linecap="round" stroke-linejoin="round" d="M7.5 7.5h-.75A2.25 2.25 0 004.5 9.75v7.5a2.25 2.25 0 002.25 2.25h7.5a2.25 2.25 0 002.25-2.25v-7.5a2.25 2.25 0 00-2.25-2.25h-.75m-6 3.75l3-3m0 0l3 3m-3-3v11.25m6-2.25h.75a2.25 2.25 0 002.25-2.25v-7.5a2.25 2.25 0 00-2.25-2.25h-.75" />
           </svg>
           <span class="font-medium">Updates</span>
+          <span
+            v-if="engine.updateAvailable"
+            class="ml-auto flex items-center gap-1.5 text-[10px] font-semibold uppercase tracking-wide text-amber-300"
+            :title="engine.pendingLabel"
+          >
+            <span class="relative flex h-2 w-2">
+              <span class="animate-ping absolute inline-flex h-full w-full rounded-full bg-amber-400 opacity-75"></span>
+              <span class="relative inline-flex rounded-full h-2 w-2 bg-amber-400"></span>
+            </span>
+            Nuevo
+          </span>
         </router-link>
 
         <button @click="infraModal.show = true" class="nav-item group w-full">
@@ -90,7 +101,12 @@
           </div>
           <div class="flex flex-col">
             <span class="text-xs font-medium text-white">System Online</span>
-            <span class="text-[10px] text-slate-400">v1.2.0-stable</span>
+            <router-link
+              to="/updates"
+              class="text-[10px] font-mono hover:underline"
+              :class="engine.updateAvailable ? 'text-amber-300' : 'text-slate-400'"
+              :title="engine.updateAvailable ? engine.pendingLabel : 'Versión del engine en esta célula'"
+            >{{ engine.version }}</router-link>
           </div>
         </div>
       </div>
@@ -873,6 +889,47 @@ const onSyncComplete = (event) => {
   }
 }
 
+// ── Versión del engine y aviso de actualización ──────────────────────────
+// La versión sale de la procedencia real de la célula (antes era un texto fijo
+// que no correspondía a nada). Cada consulta pregunta a GitHub, así que se
+// revisa al entrar y cada 10 minutos, no en cada navegación.
+const ENGINE_CHECK_MS = 10 * 60 * 1000
+const engine = reactive({ version: '…', updateAvailable: false, pendingLabel: '' })
+let engineTimer = null
+
+const applyEngineStatus = (data) => {
+  engine.version = data.current?.version || 'unknown'
+  engine.updateAvailable = !!data.update_available
+  const pending = data.upstream?.ahead_by
+  engine.pendingLabel = data.update_available
+    ? (pending ? `${pending} commit(s) sin aplicar` : `Disponible: ${data.latest?.version}`)
+    : ''
+}
+
+const checkEngine = async () => {
+  try {
+    const { data } = await api.get('/core/updates')
+    applyEngineStatus(data)
+  } catch (e) {
+    // Sin GitHub o sin permisos la consola sigue funcionando; solo no avisa.
+  }
+}
+
+const startEngineChecks = () => {
+  checkEngine()
+  clearInterval(engineTimer)
+  engineTimer = setInterval(checkEngine, ENGINE_CHECK_MS)
+}
+
+watch(() => authState.isAuthenticated, (loggedIn) => {
+  if (loggedIn) startEngineChecks()
+  else clearInterval(engineTimer)
+})
+
+// Updates.vue comparte el resultado cuando revisa a mano: la barra se actualiza
+// sin volver a consultar GitHub.
+const onEngineChecked = (event) => { if (event.detail) applyEngineStatus(event.detail) }
+
 onMounted(() => {
   // Load public settings (ArgoCD URL, Tailscale info, etc.)
   loadPublicSettings()
@@ -880,14 +937,18 @@ onMounted(() => {
   // Only call authenticated endpoints if user is logged in
   if (authState.isAuthenticated) {
     getSyncStatus().catch(() => {})
+    startEngineChecks()
   }
-  
+
   // Listen for sync complete events
   window.addEventListener('kaanbal:sync-complete', onSyncComplete)
+  window.addEventListener('kaanbal:engine-checked', onEngineChecked)
 })
 
 onUnmounted(() => {
   window.removeEventListener('kaanbal:sync-complete', onSyncComplete)
+  window.removeEventListener('kaanbal:engine-checked', onEngineChecked)
+  clearInterval(engineTimer)
 })
 </script>
 

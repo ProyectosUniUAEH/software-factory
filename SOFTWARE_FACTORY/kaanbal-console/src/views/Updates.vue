@@ -181,6 +181,7 @@ const load = async () => {
   try {
     const { data: payload } = await axios.get('/api/v1/core/updates')
     data.value = payload
+    window.dispatchEvent(new CustomEvent('kaanbal:engine-checked', { detail: payload }))
   } catch (e) {
     error.value = e.response?.data?.detail || 'No se pudo consultar el estado del engine'
   } finally {

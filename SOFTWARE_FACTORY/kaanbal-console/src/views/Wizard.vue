@@ -160,7 +160,8 @@
                       <span>Use root domain in prod (<code>https://{{ rootDomainHost }}</code>) and assign internal name <code>homepage</code> automatically.</span>
                     </label>
                     <p v-else-if="existingRootApp && selectedTemplate?.category === 'frontend'" class="mt-2 text-xs text-amber-400/80">
-                      ⚠️ Root domain is already assigned to <span class="font-mono font-semibold">{{ existingRootApp }}</span>. Only one root-domain app is allowed.
+                      ⚠️ La raíz de <span class="font-mono">{{ rootDomainHost }}</span> ya la usa
+                      <span class="font-mono font-semibold">{{ existingRootApp }}</span>. Puede haber una app raíz por dominio: elige otro dominio para usar su raíz.
                     </p>
                   </div>
 
@@ -719,7 +720,6 @@ const terminalBody = ref(null)
 const templateSearch = ref('')
 const templateCategoryFilter = ref('')
 const useRootDomain = ref(false)
-const existingRootApp = ref(null)  // Track if a root-domain app already exists
 
 // Environment config
 const envLabels = { dev: 'Development', staging: 'Staging', prod: 'Production' }
@@ -1043,10 +1043,32 @@ const categoryIcons = {
     iot: '📡', monitoring: '📊', devtools: '🛠️', fullstack: '📚', messaging: '📡'
 }
 
+// Multi-dominio: la raíz es la del dominio elegido, no la de la instalación.
+const selectedDomainFqdn = computed(() =>
+  availableDomains.value.find(d => d._id === form.domain_id)?.fqdn || null
+)
+
 const rootDomainHost = computed(() => {
+  if (selectedDomainFqdn.value) return selectedDomainFqdn.value
   const configured = getConfig('domain', '')
   if (configured) return configured
   return window.location.hostname.replace(/^kaanbal-console\./, '')
+})
+
+// Una app raíz por dominio: cada cliente puede tener su propio sitio en la raíz
+// de su dominio. Antes el límite era uno por instalación.
+const existingRootApp = computed(() => {
+  const defaultId = availableDomains.value.find(d => d.is_default)?._id || null
+  const targetId = form.domain_id || defaultId
+  const found = existingApps.value.find(app =>
+    app.is_root_domain && ((app.domain?.id || app.domain_id || defaultId) === targetId)
+  )
+  return found ? found.name : null
+})
+
+// Cambiar a un dominio cuya raíz ya está ocupada invalida la elección anterior.
+watch(existingRootApp, (taken) => {
+  if (taken && useRootDomain.value) useRootDomain.value = false
 })
 
 const supportsRootDomain = computed(() => {
@@ -1355,12 +1377,10 @@ onMounted(async () => {
         loadingTemplates.value = false
     }
 
-    // Check if a root-domain app already exists (only one allowed)
+    // Apps existentes: nombres ocupados y apps raíz por dominio (existingRootApp).
     try {
         const { data } = await axios.get('/api/v1/apps')
-      existingApps.value = data
-        const found = data.find(a => a.is_root_domain)
-        if (found) existingRootApp.value = found.name
+        existingApps.value = data
     } catch (e) {
         // Non-critical — supportsRootDomain stays false if we can't check
     }

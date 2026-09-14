@@ -304,6 +304,55 @@ class ProvisionConflictTests(unittest.TestCase):
         self.assertNotIn("*.nuevo.com", [p["name"] for p in client.posted])
 
 
+INDEX = {
+    "by_id": {
+        "d-default": {"_id": "d-default", "fqdn": "siboenglishnest.site", "is_default": True},
+        "d-uaeh": {"_id": "d-uaeh", "fqdn": "uaeh-genomicaygenetica.site", "is_default": False},
+    },
+    "default": {"_id": "d-default", "fqdn": "siboenglishnest.site", "is_default": True},
+}
+
+
+class AppDomainDescriptionTests(unittest.TestCase):
+    def test_public_url_uses_the_app_domain_not_the_installation(self):
+        """El bug reportado: Open App mandaba tes al dominio de la instalación."""
+        app = {"name": "tes", "domain_id": "d-uaeh", "environments": ["prod"],
+               "exposure": {"per_env": {"prod": "public"}}}
+        got = ds.describe_app_domain(app, INDEX)
+        self.assertEqual(got["fqdn"], "uaeh-genomicaygenetica.site")
+        self.assertEqual(got["urls"]["prod"], "https://tes.uaeh-genomicaygenetica.site")
+        self.assertFalse(got["is_default"])
+
+    def test_app_without_domain_id_lives_on_default(self):
+        app = {"name": "web", "environments": ["prod"], "exposure": {"per_env": {"prod": "public"}}}
+        self.assertEqual(ds.describe_app_domain(app, INDEX)["urls"]["prod"], "https://web.siboenglishnest.site")
+
+    def test_non_prod_envs_get_prefixed_hosts(self):
+        app = {"name": "api", "domain_id": "d-uaeh", "environments": ["dev", "prod"],
+               "exposure": {"per_env": {"dev": "public", "prod": "public"}}}
+        hosts = ds.describe_app_domain(app, INDEX)["hosts"]
+        self.assertEqual(hosts, {"dev": "dev-api.uaeh-genomicaygenetica.site", "prod": "api.uaeh-genomicaygenetica.site"})
+
+    def test_private_app_has_no_public_urls(self):
+        app = {"name": "db", "domain_id": "d-uaeh", "environments": ["prod"],
+               "exposure": {"per_env": {"prod": "tailscale"}}}
+        got = ds.describe_app_domain(app, INDEX)
+        self.assertFalse(got["public"])
+        self.assertEqual(got["urls"], {})
+
+    def test_root_app_takes_the_bare_domain(self):
+        """Escenario de clientes: cada dominio puede tener su propia app raíz."""
+        app = {"name": "homepage-2", "domain_id": "d-uaeh", "is_root_domain": True,
+               "environments": ["prod"], "exposure": {"per_env": {"prod": "public"}}}
+        self.assertEqual(ds.describe_app_domain(app, INDEX)["hosts"]["prod"], "uaeh-genomicaygenetica.site")
+
+    def test_claims_are_scoped_to_the_domain(self):
+        """Dos dominios no chocan aunque la app se llame igual en ambos hosts."""
+        app = {"name": "web", "environments": ["prod"], "exposure": {"per_env": {"prod": "public"}}}
+        self.assertNotEqual(ds.claims_for(app, "a.com"), ds.claims_for(app, "b.com"))
+        self.assertEqual(ds.claims_for(app, "a.com"), ["web.a.com"])
+
+
 class VerifyTests(unittest.TestCase):
     def test_reports_missing_credentials_without_calling_cloudflare(self):
         db = FakeDB(system_config=[{"_id": "main", "domain": "x.com"}])

@@ -27,8 +27,14 @@ class SwitchValidationTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             self.svc.validate_modes("database", {"prod": "public"})
 
-    def test_allows_both_workflow(self):
-        self.svc.validate_modes("workflow", {"prod": "both"})
+    def test_rejects_both_for_workflow(self):
+        # v1: workflow usa un canal completo por ambiente (defaults.EXPOSURE_RULES);
+        # el modo Mixed se retiró a propósito para n8n y este test quedó atrás.
+        with self.assertRaises(ValueError):
+            self.svc.validate_modes("workflow", {"prod": "both"})
+
+    def test_allows_public_workflow_for_webhooks(self):
+        self.svc.validate_modes("workflow", {"prod": "public"})
 
 
 if __name__ == "__main__":

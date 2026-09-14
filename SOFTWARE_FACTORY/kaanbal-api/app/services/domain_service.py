@@ -474,6 +474,82 @@ async def deprovision(fqdn: str, *, zone_id: str, tunnel_id: str) -> Dict[str, A
     return {"fqdn": fqdn, "removed": removed}
 
 
+PUBLIC_MODES = ("public", "both")
+
+
+def public_host(app_name: str, env: str, fqdn: str, *, is_root_domain: bool = False) -> str:
+    """Host público de una app en un ambiente.
+
+    Misma regla que AppDeployer._build_public_host: prod vive en <app>.<dominio>
+    (o en el dominio desnudo si es la app raíz) y el resto en <env>-<app>.<dominio>.
+    La consola no debe reconstruir esto por su cuenta: hacerlo con el dominio de
+    la instalación fue lo que mandaba "Open App" al dominio equivocado.
+    """
+    if env == "prod":
+        return fqdn if is_root_domain else f"{app_name}.{fqdn}"
+    return f"{env}-{app_name}.{fqdn}"
+
+
+def env_modes(app_doc: dict) -> Dict[str, str]:
+    """Modo de exposición efectivo por ambiente activo."""
+    exposure = app_doc.get("exposure") or {}
+    per_env = exposure.get("per_env") or {}
+    fallback = str(exposure.get("type") or "internal")
+    return {
+        env: str(per_env.get(env) or fallback)
+        for env in (app_doc.get("environments") or ["prod"])
+    }
+
+
+async def domains_index() -> Dict[str, Any]:
+    """Todos los dominios por id, más el default. Una sola consulta para listar apps."""
+    db = get_db()
+    docs = await db.domains.find().to_list(100)
+    by_id = {str(d["_id"]): d for d in docs}
+    default = next((d for d in docs if d.get("is_default")), None)
+    if default is None:
+        config = await get_system_config()
+        if config.get("domain"):
+            default = {"_id": None, "fqdn": config["domain"], "is_default": True}
+    return {"by_id": by_id, "default": default}
+
+
+def describe_app_domain(app_doc: dict, index: Dict[str, Any]) -> Dict[str, Any]:
+    """Dominio de una app tal como debe verlo la consola.
+
+    Incluye los hosts y URLs públicos ya resueltos por ambiente, así la consola no
+    tiene que adivinarlos. Una app sin ambientes públicos no "vive" en ningún
+    dominio: se reporta como privada aunque tenga domain_id.
+    """
+    domain = index["by_id"].get(str(app_doc.get("domain_id") or "")) or index.get("default") or {}
+    fqdn = domain.get("fqdn") or ""
+    modes = env_modes(app_doc)
+    public_envs = [env for env, mode in modes.items() if mode in PUBLIC_MODES]
+    is_root = bool(app_doc.get("is_root_domain"))
+    hosts = {
+        env: public_host(app_doc.get("name", ""), env, fqdn, is_root_domain=is_root)
+        for env in public_envs
+    } if fqdn else {}
+    return {
+        "id": str(domain["_id"]) if domain.get("_id") else None,
+        "fqdn": fqdn or None,
+        "is_default": bool(domain.get("is_default")),
+        "public": bool(public_envs),
+        "modes": modes,
+        "hosts": hosts,
+        "urls": {env: f"https://{host}" for env, host in hosts.items()},
+    }
+
+
+def claims_for(app_doc: dict, fqdn: str) -> List[str]:
+    """Hosts públicos que una app reserva en un dominio (para detectar choques)."""
+    is_root = bool(app_doc.get("is_root_domain"))
+    return sorted({
+        public_host(app_doc.get("name", ""), env, fqdn, is_root_domain=is_root).lower()
+        for env, mode in env_modes(app_doc).items() if mode in PUBLIC_MODES
+    })
+
+
 async def count_apps_using(domain_id: str, *, is_default: bool) -> int:
     """Apps que quedarian huerfanas si el dominio desaparece.
 

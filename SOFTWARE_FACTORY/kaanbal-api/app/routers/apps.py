@@ -149,11 +149,14 @@ async def _allocate_root_app_name(db) -> str:
 
 @router.get("", response_model=List[dict])
 async def list_apps():
-    """Listar todas las apps"""
+    """Listar todas las apps, con su dominio y URLs públicas ya resueltas."""
     db = get_db()
     apps = await db.apps.find().to_list(100)
+    index = await domain_service.domains_index()
     for app in apps:
         app["_id"] = str(app["_id"])
+        app["domain"] = domain_service.describe_app_domain(app, index)
+        app["domain_move"] = _domain_move_view(app.get("domain_move"))
     return apps
 
 
@@ -165,7 +168,157 @@ async def get_app(app_name: str):
     if not app:
         raise HTTPException(status_code=404, detail="App not found")
     app["_id"] = str(app["_id"])
+    app["domain"] = domain_service.describe_app_domain(app, await domain_service.domains_index())
     return app
+
+
+async def _host_collisions(db, app: dict, target_fqdn: str) -> list:
+    """Otras apps que ya ocupan los hosts que esta app tomaría en target_fqdn."""
+    wanted = set(domain_service.claims_for(app, target_fqdn))
+    if not wanted:
+        return []
+    index = await domain_service.domains_index()
+    default_fqdn = (index.get("default") or {}).get("fqdn") or ""
+    conflicts = []
+    others = await db.apps.find(
+        {"name": {"$ne": app["name"]}},
+        {"name": 1, "environments": 1, "exposure": 1, "dns_claims": 1, "is_root_domain": 1, "domain_id": 1},
+    ).to_list(500)
+    for other in others:
+        other_fqdn = (index["by_id"].get(str(other.get("domain_id") or "")) or {}).get("fqdn") or default_fqdn
+        taken = set(c.lower() for c in _derive_claims_from_existing_app(other, other_fqdn))
+        overlap = sorted(wanted & taken)
+        if overlap:
+            conflicts.append({"app": other.get("name"), "hosts": overlap})
+    return conflicts
+
+
+# Una mudanza que lleva más que esto en "running" murió con su proceso (p. ej. la
+# API se reinició a mitad): se reporta como interrumpida en vez de colgada.
+DOMAIN_MOVE_STALE_SECONDS = 15 * 60
+
+
+def _domain_move_view(move: dict | None) -> dict | None:
+    if not move:
+        return None
+    view = dict(move)
+    started = move.get("started_at")
+    if move.get("state") == "running" and isinstance(started, datetime):
+        if (datetime.utcnow() - started).total_seconds() > DOMAIN_MOVE_STALE_SECONDS:
+            view["state"] = "interrupted"
+            view["error"] = "La mudanza se interrumpió (la API se reinició). Revisa la exposición y reintenta."
+    for key in ("started_at", "finished_at"):
+        if isinstance(view.get(key), datetime):
+            view[key] = view[key].isoformat() + "Z"
+    return view
+
+
+async def _move_domain_in_background(app: dict, per_env: dict, target: dict, actor: str):
+    db = get_db()
+    try:
+        result = await _run_switch(
+            app, per_env=per_env, port_exposure=None,
+            target_domain_id=str(target["_id"]), actor=actor,
+        )
+        urls = {
+            env: f"https://{domain_service.public_host(app['name'], env, target['fqdn'], is_root_domain=bool(app.get('is_root_domain')))}"
+            for env, mode in per_env.items() if mode in domain_service.PUBLIC_MODES
+        }
+        # "pending": el DNS y el Ingress quedaron aplicados pero el probe aún no
+        # respondió (propagación). No es un fallo; la consola lo dice así.
+        await db.apps.update_one({"name": app["name"]}, {"$set": {
+            "domain_move.state": "succeeded" if result.get("validated") else "pending",
+            "domain_move.urls": urls,
+            "domain_move.pending": result.get("pending") or [],
+            "domain_move.finished_at": datetime.utcnow(),
+        }})
+    except Exception as exc:
+        logger.exception("domain move failed for %s", app["name"])
+        await db.apps.update_one({"name": app["name"]}, {"$set": {
+            "domain_move.state": "failed",
+            "domain_move.error": str(exc)[:300],
+            "domain_move.finished_at": datetime.utcnow(),
+        }})
+
+
+@router.get("/{app_name}/domain")
+async def get_app_domain_move(app_name: str):
+    """Dominio actual de la app y estado de la última mudanza."""
+    db = get_db()
+    app = await db.apps.find_one({"name": app_name})
+    if not app:
+        raise HTTPException(status_code=404, detail="App not found")
+    return {
+        "domain": domain_service.describe_app_domain(app, await domain_service.domains_index()),
+        "move": _domain_move_view(app.get("domain_move")),
+    }
+
+
+@router.post("/{app_name}/domain", status_code=202)
+async def change_app_domain(
+    app_name: str,
+    body: dict,
+    background_tasks: BackgroundTasks,
+    current_user: User = Depends(get_current_active_user),
+):
+    """Mudar una app pública a otro dominio padre. Responde 202 de inmediato.
+
+    Reutiliza la coreografía de exposición: publica el DNS nuevo, lo prueba y
+    retira el anterior solo cuando el nuevo ya respondió. Antes de mover nada
+    verifica que ninguna otra app ocupe esos hosts en el dominio destino. Corre
+    en segundo plano porque puede tardar más de lo que Cloudflare espera una
+    respuesta; la consola sigue el estado con GET /{app_name}/domain.
+    """
+    db = get_db()
+    app = await db.apps.find_one({"name": app_name})
+    if not app:
+        raise HTTPException(status_code=404, detail="App not found")
+
+    target_domain_id = str(body.get("domain_id") or "")
+    try:
+        target = await db.domains.find_one({"_id": ObjectId(target_domain_id)})
+    except InvalidId:
+        raise HTTPException(status_code=400, detail="Invalid domain id")
+    if not target:
+        raise HTTPException(status_code=404, detail="Domain not found")
+
+    index = await domain_service.domains_index()
+    current = domain_service.describe_app_domain(app, index)
+    if not current["public"]:
+        raise HTTPException(
+            status_code=400,
+            detail="La app no tiene ambientes públicos: el dominio no aplica. Hazla pública desde su exposición primero.",
+        )
+    if current["id"] == str(target["_id"]):
+        raise HTTPException(status_code=409, detail=f"{app_name} ya vive en {target['fqdn']}.")
+
+    collisions = await _host_collisions(db, app, target["fqdn"])
+    if collisions:
+        first = collisions[0]
+        raise HTTPException(
+            status_code=409,
+            detail=f"{', '.join(first['hosts'])} ya lo usa la app '{first['app']}' en {target['fqdn']}.",
+        )
+
+    move_view = _domain_move_view(app.get("domain_move"))
+    if move_view and move_view.get("state") == "running":
+        raise HTTPException(status_code=409, detail="Ya hay una mudanza de dominio en curso para esta app.")
+
+    per_env = current["modes"]
+    move = {
+        "state": "running",
+        "from": current["fqdn"],
+        "to": target["fqdn"],
+        "actor": current_user.username,
+        "started_at": datetime.utcnow(),
+    }
+    await db.apps.update_one({"name": app_name}, {"$set": {"domain_move": move}})
+    await activity_log.log(
+        "app.domain.move.started", category=CATEGORY_APP, actor=current_user.username,
+        target=app_name, detail={"from": current["fqdn"], "to": target["fqdn"]},
+    )
+    background_tasks.add_task(_move_domain_in_background, app, per_env, target, current_user.username)
+    return {"app": app_name, "move": _domain_move_view(move)}
 
 
 @router.post("", status_code=202)
@@ -213,7 +366,18 @@ async def create_app(
 
     existing = await db.apps.find_one({"name": {"$regex": f"^{re.escape(normalized_name)}$", "$options": "i"}})
     if existing:
-        raise HTTPException(status_code=409, detail=f"App name '{normalized_name}' already exists")
+        # El nombre es la identidad de la app en toda la plataforma: repo en
+        # GitHub, Deployment/Service/Ingress, Application de ArgoCD, rutas de
+        # Vault. Dos apps con el mismo nombre en dominios distintos se pisarían
+        # en todo eso aunque sus URLs no choquen.
+        raise HTTPException(
+            status_code=409,
+            detail=(
+                f"Ya existe una app llamada '{normalized_name}'. El nombre debe ser único en la "
+                "instalación (identifica su repo, despliegue y secretos), aunque vivan en dominios "
+                f"distintos. Prueba con un prefijo por cliente, por ejemplo 'cliente1-{normalized_name}'."
+            ),
+        )
 
     dns_claims = _build_public_dns_claims(app_data, domain, normalized_name, use_root_domain)
     if dns_claims:
@@ -1274,17 +1438,23 @@ async def switch_app_exposure(
             raise HTTPException(status_code=400, detail="Invalid domain id")
         if not target_domain:
             raise HTTPException(status_code=404, detail="Domain not found")
-
-    port_exposure = body.get("port_exposure")
-    deployer = AppDeployer()
-    from app.services.exposure import ExposureSwitchService
-    switcher = ExposureSwitchService(deployer)
+        # Mismo guardia que POST /domain: nunca mover una app a hosts ocupados.
+        moved = {**app, "exposure": {**(app.get("exposure") or {}), "per_env": {
+            **((app.get("exposure") or {}).get("per_env") or {}), **per_env,
+        }}}
+        collisions = await _host_collisions(db, moved, target_domain["fqdn"])
+        if collisions and str(app.get("domain_id") or "") != str(target_domain["_id"]):
+            first = collisions[0]
+            raise HTTPException(
+                status_code=409,
+                detail=f"{', '.join(first['hosts'])} ya lo usa la app '{first['app']}' en {target_domain['fqdn']}.",
+            )
 
     try:
-        result = await switcher.switch(
-            app_doc=app,
+        return await _run_switch(
+            app,
             per_env=per_env,
-            port_exposure=port_exposure,
+            port_exposure=body.get("port_exposure"),
             target_domain_id=target_domain_id,
             actor=current_user.username,
         )
@@ -1293,6 +1463,28 @@ async def switch_app_exposure(
     except Exception as exc:
         logger.exception("exposure switch failed for %s", app_name)
         raise HTTPException(status_code=500, detail=str(exc)[:300])
+
+
+async def _run_switch(app: dict, *, per_env: dict, port_exposure, target_domain_id, actor: str) -> dict:
+    """Aplica un cambio de exposición (y de dominio) y persiste el resultado.
+
+    Separado del endpoint para poder correrlo en segundo plano: una mudanza de
+    dominio espera la proyección de ArgoCD y el probe HTTP, y puede pasar de los
+    100 s que Cloudflare tolera antes de cortar la petición con un 524.
+    """
+    db = get_db()
+    app_name = app["name"]
+    deployer = AppDeployer()
+    from app.services.exposure import ExposureSwitchService
+    switcher = ExposureSwitchService(deployer)
+
+    result = await switcher.switch(
+        app_doc=app,
+        per_env=per_env,
+        port_exposure=port_exposure,
+        target_domain_id=target_domain_id,
+        actor=actor,
+    )
 
     domain_updates = {}
     if result.get("domain_changed"):
@@ -1329,7 +1521,7 @@ async def switch_app_exposure(
     await activity_log.log(
         "app.exposure.switched",
         category=CATEGORY_APP,
-        actor=current_user.username,
+        actor=actor,
         target=app_name,
         detail={
             "per_env": per_env,

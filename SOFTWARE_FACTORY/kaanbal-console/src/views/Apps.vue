@@ -40,6 +40,100 @@
       </Transition>
     </Teleport>
 
+    <!-- Mover app a otro dominio -->
+    <Teleport to="body">
+      <Transition name="fade">
+        <div
+          v-if="domainChange.show"
+          class="fixed inset-0 z-[90] flex items-center justify-center p-4 bg-black/70 backdrop-blur-sm"
+          @click.self="closeDomainChange"
+        >
+          <div class="w-full max-w-lg rounded-2xl border border-white/10 bg-slate-900 shadow-2xl">
+            <div class="p-6 border-b border-white/10">
+              <h3 class="text-lg font-bold text-white">Mover {{ domainChange.app?.name }} a otro dominio</h3>
+              <p class="text-sm text-slate-400 mt-1">
+                Hoy vive en <span class="font-mono text-emerald-300">{{ primaryHost(domainChange.app) }}</span>
+              </p>
+            </div>
+
+            <div class="p-6 space-y-4">
+              <template v-if="domainChange.phase === 'choose'">
+                <label class="block text-xs font-semibold text-slate-300">Dominio destino</label>
+                <select v-model="domainChange.targetId" class="w-full bg-slate-950 border border-white/10 rounded-lg px-3 py-2 text-white text-sm">
+                  <option
+                    v-for="d in availableDomains.filter(d => d._id !== domainChange.app?.domain?.id)"
+                    :key="d._id"
+                    :value="d._id"
+                  >{{ d.fqdn }}{{ d.is_default ? ' (default · Kaanbal)' : '' }}</option>
+                </select>
+
+                <div v-if="domainChange.targetId" class="rounded-lg bg-slate-950/60 border border-white/10 p-3 space-y-1">
+                  <p class="text-xs text-slate-400">Quedará en:</p>
+                  <p v-for="(host, env) in previewHosts(domainChange.app, domainChange.targetId)" :key="env" class="text-sm font-mono text-emerald-300">
+                    https://{{ host }} <span class="text-[10px] text-slate-500 font-sans">({{ env }})</span>
+                  </p>
+                </div>
+
+                <p class="text-xs text-slate-400">
+                  Se publica en el dominio nuevo, se prueba que responda y el anterior se retira solo
+                  cuando el nuevo ya funciona. Puede tardar 1–2 minutos; el código y los datos de la app no se tocan.
+                </p>
+              </template>
+
+              <div v-else-if="domainChange.phase === 'running'" class="flex items-start gap-3">
+                <span class="animate-spin text-xl">⏳</span>
+                <div>
+                  <p class="text-sm text-sky-200 font-medium">Mudando a {{ domainChange.targetFqdn }}…</p>
+                  <p class="text-xs text-slate-400 mt-1">
+                    Publicando el DNS y esperando a que el host nuevo responda. Puedes cerrar esta
+                    ventana: la mudanza sigue y la tarjeta muestra su estado.
+                  </p>
+                </div>
+              </div>
+
+              <div v-else-if="domainChange.phase === 'succeeded'" class="space-y-2">
+                <p class="text-sm text-emerald-300 font-medium">✅ Mudanza verificada</p>
+                <a
+                  v-for="(url, env) in domainChange.urls"
+                  :key="env"
+                  :href="url"
+                  target="_blank"
+                  rel="noopener"
+                  class="block text-sm font-mono text-emerald-200 hover:underline"
+                >{{ url }} ↗</a>
+              </div>
+
+              <div v-else-if="domainChange.phase === 'pending'" class="space-y-2">
+                <p class="text-sm text-amber-300 font-medium">Aplicada, todavía propagando</p>
+                <p class="text-xs text-slate-400">
+                  El DNS y la ruta ya están en el dominio nuevo, pero el host aún no respondió en la
+                  prueba. Suele resolverse en unos minutos.
+                </p>
+                <a v-for="(url, env) in domainChange.urls" :key="env" :href="url" target="_blank" rel="noopener"
+                   class="block text-sm font-mono text-amber-200 hover:underline">{{ url }} ↗</a>
+              </div>
+
+              <p v-if="domainChange.error" class="text-sm text-red-300 bg-red-500/10 border border-red-500/30 rounded-lg p-3">
+                {{ domainChange.error }}
+              </p>
+            </div>
+
+            <div class="p-6 border-t border-white/10 flex justify-end gap-3">
+              <button @click="closeDomainChange" class="px-4 py-2 rounded-lg text-sm text-slate-300 border border-white/10 hover:bg-white/5">
+                {{ domainChange.phase === 'choose' ? 'Cancelar' : 'Cerrar' }}
+              </button>
+              <button
+                v-if="domainChange.phase === 'choose'"
+                @click="startDomainChange"
+                :disabled="!domainChange.targetId || domainChange.submitting"
+                class="px-4 py-2 rounded-lg text-sm font-semibold bg-blue-600 hover:bg-blue-500 text-white disabled:opacity-40 disabled:cursor-not-allowed"
+              >{{ domainChange.submitting ? 'Iniciando…' : 'Mover' }}</button>
+            </div>
+          </div>
+        </div>
+      </Transition>
+    </Teleport>
+
     <!-- Loading State -->
     <div v-if="loading" class="text-center py-12">
       <div class="relative inline-block">
@@ -147,16 +241,35 @@
         </div>
       </div>
 
+      <!-- Organización: por grupo lógico o por dominio público -->
+      <div v-if="regularApps.length > 0" class="flex items-center justify-between gap-3 flex-wrap">
+        <div class="inline-flex rounded-xl border border-white/10 bg-white/[0.03] p-1">
+          <button
+            v-for="mode in [{ id: 'group', label: '🗂️ Por grupo' }, { id: 'domain', label: '🌐 Por dominio' }]"
+            :key="mode.id"
+            @click="groupMode = mode.id"
+            class="px-3 py-1.5 rounded-lg text-xs font-medium transition-colors"
+            :class="groupMode === mode.id ? 'bg-blue-500/20 text-blue-200 border border-blue-500/30' : 'text-slate-400 hover:text-white border border-transparent'"
+          >{{ mode.label }}</button>
+        </div>
+        <p class="text-xs text-slate-500">
+          {{ regularApps.length }} app(s) · {{ publicDomainCount }} dominio(s) con apps públicas
+        </p>
+      </div>
+
       <!-- User Apps -->
       <div v-if="groupedRegularApps.length > 0" class="space-y-6">
         <div v-for="group in groupedRegularApps" :key="group.key" class="rounded-2xl border border-white/10 bg-white/[0.02] p-4">
           <div class="flex items-center justify-between gap-3 mb-4">
-            <button @click="toggleGroupCollapse(group.key)" class="flex items-center gap-3 text-left">
+            <button @click="toggleGroupCollapse(group.key)" class="flex items-center gap-3 text-left min-w-0">
               <span class="text-slate-300 text-xs">{{ isGroupCollapsed(group.key) ? '▶' : '▼' }}</span>
-              <span class="text-sm font-semibold text-white">{{ group.label }}</span>
-              <span class="text-[10px] px-2 py-0.5 rounded bg-cyan-500/15 text-cyan-300 border border-cyan-500/30">{{ group.apps.length }} apps</span>
+              <span class="text-sm font-semibold text-white truncate">{{ group.label }}</span>
+              <span class="text-[10px] px-2 py-0.5 rounded bg-cyan-500/15 text-cyan-300 border border-cyan-500/30 shrink-0">{{ group.apps.length }} apps</span>
+              <span v-if="group.isDefaultDomain" class="text-[10px] px-2 py-0.5 rounded bg-blue-500/15 text-blue-300 border border-blue-500/30 shrink-0">default · Kaanbal</span>
             </button>
-            <span class="text-[10px] uppercase tracking-wider text-slate-500">Group</span>
+            <span v-if="group.kind === 'domain' && group.fqdn" class="text-[10px] uppercase tracking-wider text-slate-500">Dominio</span>
+            <span v-else-if="group.kind === 'private'" class="text-[10px] uppercase tracking-wider text-slate-500">Sin dominio público</span>
+            <span v-else class="text-[10px] uppercase tracking-wider text-slate-500">Group</span>
           </div>
 
           <div v-if="!isGroupCollapsed(group.key)" class="grid grid-cols-1 lg:grid-cols-2 xl:grid-cols-3 gap-6">
@@ -184,7 +297,9 @@
                 </div>
                 <div>
                   <h3 class="font-bold text-white text-xl group-hover:text-blue-400 transition-colors">{{ app.name }}</h3>
-                  <p class="text-xs text-slate-500 font-medium uppercase tracking-wider">{{ app.type }}</p>
+                  <p class="text-xs text-slate-500 font-medium uppercase tracking-wider">
+                    {{ app.type }}<span v-if="app.is_root_domain" class="ml-1.5 normal-case text-amber-300">· raíz del dominio</span>
+                  </p>
                   <p v-if="app.app_group" class="text-[10px] text-cyan-300 mt-1">Group: {{ app.app_group }}</p>
                 </div>
               </div>
@@ -221,6 +336,47 @@
                 </Transition>
               </div>
             </div>
+          </div>
+
+          <!-- Dominio: dónde vive la app en internet, o por qué no vive en ninguno -->
+          <div class="px-6 mb-4">
+            <div
+              v-if="app.domain_move?.state === 'running'"
+              class="flex items-center gap-2 rounded-lg border border-sky-500/30 bg-sky-500/5 px-3 py-2 text-xs text-sky-200"
+            >
+              <span class="animate-spin inline-block">⏳</span>
+              Mudando de {{ app.domain_move.from }} a {{ app.domain_move.to }}…
+            </div>
+            <div
+              v-else-if="app.domain?.public"
+              class="flex items-center gap-2 rounded-lg border border-emerald-500/20 bg-emerald-500/5 px-3 py-2 min-w-0"
+            >
+              <span class="text-sm shrink-0">🌐</span>
+              <a
+                :href="getAppUrl(app)"
+                target="_blank"
+                rel="noopener"
+                class="text-xs font-mono text-emerald-200 hover:underline truncate"
+                :title="getAppUrl(app)"
+              >{{ primaryHost(app) }}</a>
+              <span v-if="!app.domain.is_default" class="shrink-0 text-[10px] px-1.5 py-0.5 rounded bg-purple-500/15 text-purple-300 border border-purple-500/25">cliente</span>
+              <button
+                v-if="availableDomains.length > 1"
+                @click="openDomainChange(app)"
+                class="ml-auto shrink-0 text-[11px] px-2 py-1 rounded-md border border-white/10 text-slate-300 hover:text-white hover:bg-white/5"
+                title="Mover esta app a otro dominio"
+              >Cambiar</button>
+            </div>
+            <div v-else class="flex items-center gap-2 rounded-lg border border-white/10 bg-white/[0.02] px-3 py-2 text-xs text-slate-400">
+              <span>🔒</span> Privada · {{ privateLabel(app) }}
+              <span class="ml-auto text-[10px] text-slate-500">sin dominio público</span>
+            </div>
+            <p
+              v-if="['failed', 'interrupted'].includes(app.domain_move?.state)"
+              class="mt-2 text-[11px] text-red-300"
+            >
+              La última mudanza a {{ app.domain_move.to }} no terminó: {{ app.domain_move.error }}
+            </p>
           </div>
 
           <!-- Stats Row -->
@@ -1252,6 +1408,10 @@ const getPublicDomain = () => {
   if (configured) return configured
   return window.location.hostname.replace(/^kaanbal-console\./, '')
 }
+// Dominio donde vive una app: el que resolvió la API (domain.fqdn). Construir
+// URLs con el dominio de la instalación mandaba apps de otros dominios al host
+// equivocado. Las URLs del core (API, consola, Vault) sí usan getPublicDomain.
+const appDomain = (app) => app?.domain?.fqdn || getPublicDomain()
 const getTailscaleSuffix = () => getConfig('tailscaleSuffix', '')
 const normalizeTailscaleUrl = (value) => {
   if (!value) return null
@@ -1273,23 +1433,33 @@ const getGitNamespace = () => getConfig('gitNamespace', '')
 const CORE_APP_NAMES = new Set(['datastore'])
 const groupCollapseState = ref({})
 
-// Separate root-domain app from regular apps for special rendering
-const rootApp = computed(() => apps.value.find(a => a.is_root_domain))
+// La tarjeta destacada es la app raíz del dominio de Kaanbal. Con varios dominios
+// cada uno puede tener su propia raíz (el sitio de un cliente): esas se muestran
+// como tarjetas normales. Antes solo existía una y las demás desaparecían.
+const rootApp = computed(() =>
+  apps.value.find(a => a.is_root_domain && (a.domain ? a.domain.is_default : true))
+)
 const regularApps = computed(() => {
   return apps.value
-    .filter(a => !a.is_root_domain)
-    .sort((a, b) => {
-      return a.name.localeCompare(b.name)
-    })
+    .filter(a => a.id !== rootApp.value?.id)
+    .sort((a, b) => a.name.localeCompare(b.name))
 })
 
-const groupedRegularApps = computed(() => {
+// ── Agrupación: por grupo lógico o por dominio público ───────────────────
+const GROUP_MODE_KEY = 'kaanbal.apps.groupMode'
+const readGroupMode = () => {
+  try { return localStorage.getItem(GROUP_MODE_KEY) === 'domain' ? 'domain' : 'group' } catch { return 'group' }
+}
+const groupMode = ref(readGroupMode())
+watch(groupMode, (mode) => { try { localStorage.setItem(GROUP_MODE_KEY, mode) } catch { /* sin storage */ } })
+
+const groupByLogicalGroup = () => {
   const map = new Map()
   regularApps.value.forEach(app => {
     const groupName = (app.app_group || '').trim()
     const key = groupName ? `group:${groupName.toLowerCase()}` : 'group:ungrouped'
     const label = groupName || 'Ungrouped'
-    if (!map.has(key)) map.set(key, { key, label, apps: [] })
+    if (!map.has(key)) map.set(key, { key, label, kind: 'group', apps: [] })
     map.get(key).apps.push(app)
   })
   return Array.from(map.values()).sort((a, b) => {
@@ -1297,7 +1467,139 @@ const groupedRegularApps = computed(() => {
     if (b.key === 'group:ungrouped') return -1
     return a.label.localeCompare(b.label)
   })
+}
+
+// El dominio de Kaanbal primero, luego los de clientes, y al final las apps que
+// no salen a internet (VPN/LAN/internas): esas no pertenecen a ningún dominio.
+const groupByDomain = () => {
+  const map = new Map()
+  regularApps.value.forEach(app => {
+    const isPublic = app.domain?.public
+    const fqdn = app.domain?.fqdn
+    const key = isPublic && fqdn ? `domain:${fqdn}` : 'domain:private'
+    if (!map.has(key)) {
+      map.set(key, isPublic && fqdn
+        ? { key, label: fqdn, kind: 'domain', fqdn, isDefaultDomain: !!app.domain.is_default, apps: [] }
+        : { key, label: 'Privadas · VPN, LAN o internas', kind: 'private', apps: [] })
+    }
+    map.get(key).apps.push(app)
+  })
+  return Array.from(map.values()).sort((a, b) => {
+    if (a.kind === 'private') return 1
+    if (b.kind === 'private') return -1
+    if (a.isDefaultDomain !== b.isDefaultDomain) return a.isDefaultDomain ? -1 : 1
+    return a.label.localeCompare(b.label)
+  })
+}
+
+const groupedRegularApps = computed(() =>
+  groupMode.value === 'domain' ? groupByDomain() : groupByLogicalGroup()
+)
+
+const publicDomainCount = computed(() =>
+  new Set(apps.value.filter(a => a.domain?.public && a.domain?.fqdn).map(a => a.domain.fqdn)).size
+)
+
+// ── Dominio en la tarjeta ────────────────────────────────────────────────
+const PRIVATE_MODE_LABELS = { tailscale: 'VPN', lan: 'LAN', internal: 'solo clúster', off: 'apagada' }
+
+const primaryHost = (app) => {
+  const hosts = app?.domain?.hosts || {}
+  return hosts.prod || Object.values(hosts)[0] || ''
+}
+
+const privateLabel = (app) => {
+  const modes = app?.domain?.modes || {}
+  const mode = modes.prod || Object.values(modes)[0]
+  return PRIVATE_MODE_LABELS[mode] || 'sin exposición pública'
+}
+
+// ── Mover app a otro dominio ─────────────────────────────────────────────
+const availableDomains = ref([])
+const loadDomains = async () => {
+  try {
+    const { data } = await axios.get('/api/v1/domains')
+    availableDomains.value = data || []
+  } catch (e) {
+    availableDomains.value = []
+  }
+}
+
+const DOMAIN_MOVE_POLL_MS = 3000
+const domainChange = reactive({
+  show: false, app: null, targetId: '', targetFqdn: '', phase: 'choose',
+  urls: {}, error: '', submitting: false,
 })
+let domainMoveTimer = null
+
+// Vista previa con la misma regla que la API (domain_service.public_host). Es solo
+// para mostrar antes de mover; las URLs reales las devuelve la API al terminar.
+const previewHosts = (app, domainId) => {
+  const target = availableDomains.value.find(d => d._id === domainId)
+  if (!app || !target) return {}
+  const out = {}
+  Object.keys(app.domain?.hosts || {}).forEach(env => {
+    out[env] = env === 'prod'
+      ? (app.is_root_domain ? target.fqdn : `${app.name}.${target.fqdn}`)
+      : `${env}-${app.name}.${target.fqdn}`
+  })
+  return out
+}
+
+const openDomainChange = (app) => {
+  const others = availableDomains.value.filter(d => d._id !== app.domain?.id)
+  Object.assign(domainChange, {
+    show: true, app, targetId: others[0]?._id || '', targetFqdn: '',
+    phase: 'choose', urls: {}, error: '', submitting: false,
+  })
+}
+
+const stopDomainMovePoll = () => { clearInterval(domainMoveTimer); domainMoveTimer = null }
+
+const closeDomainChange = () => {
+  domainChange.show = false
+  stopDomainMovePoll()
+  // La tarjeta debe reflejar dónde quedó la app aunque el modal se cierre antes.
+  fetchApps()
+}
+
+const pollDomainMove = async () => {
+  const name = domainChange.app?.name
+  if (!name) return
+  try {
+    const { data } = await axios.get(`/api/v1/apps/${name}/domain`)
+    const move = data.move || {}
+    if (move.state === 'running') return
+    stopDomainMovePoll()
+    domainChange.urls = move.urls || data.domain?.urls || {}
+    if (move.state === 'succeeded' || move.state === 'pending') {
+      domainChange.phase = move.state
+      showToast('success', 'Dominio actualizado', `${name} ahora vive en ${move.to}`)
+    } else {
+      domainChange.phase = 'choose'
+      domainChange.error = move.error || 'La mudanza no terminó.'
+    }
+  } catch (e) {
+    // Un error de red puntual no cancela la mudanza, que corre en el servidor.
+  }
+}
+
+const startDomainChange = async () => {
+  const app = domainChange.app
+  domainChange.submitting = true
+  domainChange.error = ''
+  try {
+    const { data } = await axios.post(`/api/v1/apps/${app.name}/domain`, { domain_id: domainChange.targetId })
+    domainChange.targetFqdn = data.move?.to || availableDomains.value.find(d => d._id === domainChange.targetId)?.fqdn
+    domainChange.phase = 'running'
+    stopDomainMovePoll()
+    domainMoveTimer = setInterval(pollDomainMove, DOMAIN_MOVE_POLL_MS)
+  } catch (e) {
+    domainChange.error = e.response?.data?.detail || 'No se pudo iniciar la mudanza'
+  } finally {
+    domainChange.submitting = false
+  }
+}
 
 const isGroupCollapsed = (groupKey) => !!groupCollapseState.value[groupKey]
 
@@ -1426,7 +1728,7 @@ const getEnvHealthColor = (app, env) => {
 
 const getEnvUrl = (app, env) => {
   // Fallback to simple logic if no detailed exposure
-  const domain = getPublicDomain()
+  const domain = appDomain(app)
   const base = app.url?.replace('https://', '').replace(`.${domain}`, '')
   if (env === 'prod') return app.url
   return `https://${env}-${base}.${domain}`
@@ -1447,10 +1749,10 @@ const getAppUrl = (app) => {
     const mode = getExposureType(app, env)
     if (mode === 'public' || mode === 'both') {
       if (env === 'prod' && app.is_root_domain) {
-        return `https://${getPublicDomain()}`
+        return `https://${appDomain(app)}`
       }
       const prefix = env === 'prod' ? '' : `${env}-`
-      return `https://${prefix}${app.name}.${getPublicDomain()}`
+      return `https://${prefix}${app.name}.${appDomain(app)}`
     }
   }
 
@@ -1540,7 +1842,7 @@ const getEnvLinks = (app, env) => {
                 
                 links.push({
                     label: `Open ${portName} (Public)`,
-                    url: `https://${portHostname}.${getPublicDomain()}`,
+                    url: `https://${portHostname}.${appDomain(app)}`,
                     type: 'public',
                     class: 'bg-gradient-to-r from-blue-600/20 to-purple-600/20 hover:from-blue-600/30 hover:to-purple-600/30 text-blue-300 border-blue-500/20',
                     icon: '🌐'
@@ -1582,7 +1884,7 @@ const getEnvLinks = (app, env) => {
         const mode = getExposureType(app, env)
         
         if (mode === 'public' || mode === 'both') {
-            const publicUrl = isRootProd ? `https://${getPublicDomain()}` : `https://${hostname}.${getPublicDomain()}`
+            const publicUrl = isRootProd ? `https://${appDomain(app)}` : `https://${hostname}.${appDomain(app)}`
             links.push({
                 label: `Open ${env.toUpperCase()}`,
                 url: publicUrl,
@@ -1681,9 +1983,9 @@ const getSmartDns = (app, env) => {
   }
   // Public URL
   if (type === 'public' || type === 'both') {
-    if (env === 'prod' && app?.is_root_domain) return getPublicDomain()
+    if (env === 'prod' && app?.is_root_domain) return appDomain(app)
     const prefix = env === 'prod' ? '' : `${env}-`
-    return `${prefix}${app?.name}.${getPublicDomain()}`
+    return `${prefix}${app?.name}.${appDomain(app)}`
   }
   // Internal DNS
   return getInternalDns(app, env)
@@ -2115,6 +2417,11 @@ const fetchApps = async () => {
         id: app._id,
         name: app.name,
         app_group: app.app_group || null,
+        // Sin esto el modal de exposición creía que toda app vivía en el dominio
+        // default y proponía "mudar" a donde ya estaba.
+        domain_id: app.domain_id || null,
+        domain: app.domain || null,
+        domain_move: app.domain_move || null,
         type,
         status: 'Checking...',
         url: app.subdomain ? `https://${app.subdomain}` : app.repo_url,
@@ -2149,7 +2456,8 @@ const fetchApps = async () => {
 
 onMounted(() => {
   fetchApps()
-  
+  loadDomains()
+
   // Listen for global sync complete event
   window.addEventListener('kaanbal:sync-complete', onGlobalSyncComplete)
 })
@@ -2166,11 +2474,15 @@ watch(() => modals.details.show, (isOpen) => {
 
 onUnmounted(() => {
   stopDetailsPolling()
+  stopDomainMovePoll()
   window.removeEventListener('kaanbal:sync-complete', onGlobalSyncComplete)
 })
 </script>
 
 <style scoped>
+.fade-enter-active, .fade-leave-active { transition: opacity 0.2s ease; }
+.fade-enter-from, .fade-leave-to { opacity: 0; }
+
 /* Toast Animation */
 .toast-enter-active, .toast-leave-active {
   transition: all 0.3s ease;

@@ -519,22 +519,24 @@ async function loadDomains() {
   draftDomainId.value = currentDomainId.value
 }
 
+// La mudanza corre en segundo plano en la API (POST /apps/{name}/domain): puede
+// tardar más de los 100 s que Cloudflare espera una respuesta síncrona.
 async function onSwitchDomain() {
   const target = domains.value.find(d => d._id === draftDomainId.value)
-  const per_env = {}
-  for (const env of activeEnvs.value) per_env[env] = currentMode(env)
-  if (!Object.keys(per_env).length) return
-
-  const data = await runOp(
-    `Switch parent domain → ${target?.fqdn || draftDomainId.value}`,
-    () => patchAppExposure(props.app.name, { per_env, domain_id: draftDomainId.value })
-  )
-  if (data?.domain_changed) {
-    addLog(`domain → ${data.previous_domain} ⇒ ${data.domain}`, 'text-cyan-400')
+  busy.value = true
+  addLog(`→ Mudar a ${target?.fqdn || draftDomainId.value}`, 'text-blue-400')
+  try {
+    await axios.post(`/api/v1/apps/${props.app.name}/domain`, { domain_id: draftDomainId.value })
+    addLog('✓ Mudanza iniciada. La tarjeta de la app muestra su progreso y el resultado.', 'text-emerald-400')
+    emit('toast', { type: 'info', title: 'Mudanza iniciada', message: `${props.app.name} → ${target?.fqdn}` })
+    patchLocalApp({ domain_move: { state: 'running', to: target?.fqdn } })
+  } catch (e) {
+    const detail = e.response?.data?.detail || e.message || 'unknown error'
+    addLog(`✗ ${detail}`, 'text-rose-400 font-bold')
+    emit('toast', { type: 'error', title: 'No se pudo mudar', message: String(detail).slice(0, 160) })
+  } finally {
+    busy.value = false
   }
-  patchLocalApp({ domain_id: data?.domain_id })
-  applyInventoryFromResult(data)
-  syncDraftFromApp()
 }
 
 watch(

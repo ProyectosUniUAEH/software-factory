@@ -12,6 +12,53 @@
 
     <div v-if="loading && !data" class="text-center py-12 text-slate-400">Consultando upstream...</div>
 
+    <!-- Progreso del upgrade: se lee del clúster, sobrevive a recargas y al reinicio de la API -->
+    <div
+      v-if="upgrade && upgrade.exists && (upgradeRunning || upgradeJustFinished)"
+      class="glass-panel p-6 rounded-xl"
+      :class="{
+        'border-sky-500/30': upgrade.state === 'running',
+        'border-emerald-500/30 bg-emerald-500/5': upgrade.state === 'succeeded',
+        'border-red-500/30 bg-red-500/5': upgrade.state === 'failed',
+      }"
+    >
+      <div class="flex items-start justify-between gap-3 flex-wrap">
+        <div>
+          <h3 class="font-semibold" :class="{
+            'text-sky-300': upgrade.state === 'running',
+            'text-emerald-300': upgrade.state === 'succeeded',
+            'text-red-300': upgrade.state === 'failed',
+          }">
+            <span v-if="upgrade.state === 'running'">⏳ Actualizando la célula…</span>
+            <span v-else-if="upgrade.state === 'succeeded'">✅ Upgrade verificado</span>
+            <span v-else>❌ El upgrade falló</span>
+          </h3>
+          <p class="text-xs text-slate-400 mt-1">
+            {{ currentStep }}
+            <span v-if="connectionLost" class="text-amber-300">
+              · Reconectando con la API (se está reemplazando a sí misma)…
+            </span>
+          </p>
+        </div>
+        <span class="font-mono text-xs text-slate-500">{{ upgrade.name }}</span>
+      </div>
+
+      <p v-if="upgrade.state === 'failed'" class="text-sm text-slate-300 mt-3">
+        Si el fallo ocurrió después de promover, la célula ya se revirtió a su versión anterior.
+        El detalle está en el log.
+      </p>
+
+      <div v-if="upgrade.state === 'succeeded'" class="mt-3 flex items-center gap-3 flex-wrap">
+        <p class="text-sm text-slate-300">La consola corre una versión nueva. Recárgala para verla.</p>
+        <button @click="reloadPage" class="upgrade-button">Recargar consola</button>
+      </div>
+
+      <pre
+        ref="logBox"
+        class="mt-4 text-[11px] leading-relaxed bg-slate-950/80 border border-white/10 rounded-lg p-3 max-h-80 overflow-y-auto text-slate-300 whitespace-pre-wrap"
+      >{{ upgrade.log || 'Esperando a que arranque el Job…' }}</pre>
+    </div>
+
     <template v-if="data">
       <!-- Versión actual -->
       <div class="glass-panel p-6 rounded-xl">
@@ -72,8 +119,7 @@
 
             <p class="text-xs text-slate-500 mt-4">
               El upgrade lo ejecuta un Job dedicado, no la consola: así el proceso que conduce la
-              actualización sobrevive al reemplazo de la propia API. Todavía no está habilitado
-              en esta versión.
+              actualización sobrevive al reemplazo de la propia API.
             </p>
           </div>
         </div>
@@ -125,13 +171,41 @@
             </a>
           </div>
 
-          <div v-if="data.update_available" class="mt-5 pt-4 border-t border-white/10">
-            <p class="text-sm font-medium text-slate-200">Cómo aplicarlos</p>
-            <p class="text-xs text-slate-400 mt-1">
-              Por ahora el upgrade se ejecuta en el nodo. Construye, promueve, verifica que los pods
-              arranquen y revierte solo si algo falla. Tus apps y datos no se tocan.
+          <div v-if="data.update_available && !upgradeRunning" class="mt-5 pt-4 border-t border-white/10">
+            <p class="text-xs text-slate-400">
+              Construye las imágenes, promueve, verifica que los pods arranquen y revierte solo si algo
+              falla. Tus apps y datos no se tocan. La consola se reiniciará unos segundos durante el proceso.
             </p>
-            <pre class="mt-3 text-xs bg-slate-950/80 border border-white/10 rounded-lg p-3 overflow-x-auto text-emerald-300">{{ upgradeCommand }}</pre>
+
+            <div v-if="!confirming" class="mt-3">
+              <button
+                @click="confirming = true"
+                :disabled="data.blocked_by_drift || launching"
+                class="upgrade-button"
+              >
+                ⬆️ Actualizar ahora
+              </button>
+              <p v-if="data.blocked_by_drift" class="text-xs text-amber-300 mt-2">
+                Bloqueado: hay cambios locales en el engine. Resuelve la deriva primero.
+              </p>
+            </div>
+
+            <div v-else class="mt-3 rounded-lg border border-amber-500/30 bg-amber-500/5 p-4">
+              <p class="text-sm text-amber-200">
+                ¿Aplicar {{ data.upstream.ahead_by }} commit(s) sobre esta célula?
+              </p>
+              <div class="flex gap-2 mt-3">
+                <button @click="launchUpgrade" :disabled="launching" class="upgrade-button">
+                  {{ launching ? 'Lanzando…' : 'Sí, actualizar' }}
+                </button>
+                <button @click="confirming = false" :disabled="launching" class="glass-button text-sm">Cancelar</button>
+              </div>
+            </div>
+
+            <details class="mt-4">
+              <summary class="text-xs text-slate-500 cursor-pointer">Avanzado: ejecutarlo desde el nodo</summary>
+              <pre class="mt-2 text-xs bg-slate-950/80 border border-white/10 rounded-lg p-3 overflow-x-auto text-emerald-300">{{ upgradeCommand }}</pre>
+            </details>
           </div>
         </template>
       </div>
@@ -158,8 +232,103 @@
 </template>
 
 <script setup>
-import { ref, computed, onMounted } from 'vue'
+import { ref, computed, onMounted, onUnmounted, nextTick } from 'vue'
 import axios from 'axios'
+
+// ── Upgrade desde la consola ─────────────────────────────────────────────
+// El upgrade corre como Job en el clúster. La consola solo lo lanza y lee su
+// estado, así que recargar la página o que la API se reinicie a mitad del
+// proceso no interrumpe nada: al volver se retoma el seguimiento.
+const POLL_MS = 4000
+const upgrade = ref(null)
+const confirming = ref(false)
+const launching = ref(false)
+const connectionLost = ref(false)
+const upgradeJustFinished = ref(false)
+const logBox = ref(null)
+let pollTimer = null
+
+const upgradeRunning = computed(() => upgrade.value?.exists && upgrade.value.state === 'running')
+
+// Última línea con prefijo del script: dice en qué fase va la transacción.
+const currentStep = computed(() => {
+  const lines = (upgrade.value?.log || '').split('\n').filter(l => l.includes('[kaanbal-upgrade]'))
+  const last = lines[lines.length - 1] || ''
+  return last.replace('[kaanbal-upgrade]', '').trim() || 'Preparando…'
+})
+
+const scrollLog = async () => {
+  await nextTick()
+  if (logBox.value) logBox.value.scrollTop = logBox.value.scrollHeight
+}
+
+const pollUpgrade = async () => {
+  try {
+    const { data: status } = await axios.get('/api/v1/core/upgrade', {
+      params: upgrade.value?.name ? { name: upgrade.value.name } : {},
+    })
+    connectionLost.value = false
+    const wasRunning = upgradeRunning.value
+    upgrade.value = status
+    scrollLog()
+    if (status.exists && status.state !== 'running') {
+      stopPolling()
+      if (wasRunning) {
+        upgradeJustFinished.value = true
+        load()
+      }
+    }
+  } catch (e) {
+    // Durante el upgrade la API recibe su imagen nueva y deja de responder unos
+    // segundos. No es un fallo del upgrade: se sigue intentando.
+    connectionLost.value = true
+  }
+}
+
+const startPolling = () => {
+  stopPolling()
+  pollTimer = setInterval(pollUpgrade, POLL_MS)
+}
+
+const stopPolling = () => {
+  clearInterval(pollTimer)
+  pollTimer = null
+}
+
+const launchUpgrade = async () => {
+  launching.value = true
+  error.value = ''
+  try {
+    const { data: started } = await axios.post('/api/v1/core/upgrade', { ref: 'main' })
+    upgrade.value = { exists: true, ...started, log: '' }
+    upgradeJustFinished.value = false
+    confirming.value = false
+    startPolling()
+  } catch (e) {
+    error.value = e.response?.data?.detail || 'No se pudo lanzar el upgrade'
+  } finally {
+    launching.value = false
+  }
+}
+
+const reloadPage = () => window.location.reload()
+
+// Al entrar: si hay un upgrade en curso (por ejemplo, tras recargar la página
+// a mitad del proceso), se retoma su seguimiento.
+const resumeIfRunning = async () => {
+  try {
+    const { data: status } = await axios.get('/api/v1/core/upgrade')
+    if (status.exists && status.state === 'running') {
+      upgrade.value = status
+      startPolling()
+      scrollLog()
+    }
+  } catch (e) {
+    // Sin permisos de Jobs (célula aún sin el RBAC nuevo) simplemente no se muestra.
+  }
+}
+
+onUnmounted(stopPolling)
 
 const data = ref(null)
 const loading = ref(false)
@@ -189,7 +358,10 @@ const load = async () => {
   }
 }
 
-onMounted(load)
+onMounted(() => {
+  load()
+  resumeIfRunning()
+})
 </script>
 
 <style scoped>
@@ -209,4 +381,16 @@ onMounted(load)
 }
 .glass-button:hover:not(:disabled) { background: rgba(148, 163, 184, 0.22); }
 .glass-button:disabled { opacity: 0.45; cursor: not-allowed; }
+.upgrade-button {
+  padding: 0.55rem 1.1rem;
+  border-radius: 0.5rem;
+  background: rgba(245, 158, 11, 0.2);
+  border: 1px solid rgba(245, 158, 11, 0.4);
+  color: rgb(253, 230, 138);
+  font-weight: 600;
+  font-size: 0.875rem;
+  transition: all 0.2s;
+}
+.upgrade-button:hover:not(:disabled) { background: rgba(245, 158, 11, 0.32); }
+.upgrade-button:disabled { opacity: 0.45; cursor: not-allowed; }
 </style>

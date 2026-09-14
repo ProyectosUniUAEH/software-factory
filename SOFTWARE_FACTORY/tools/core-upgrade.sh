@@ -114,6 +114,69 @@ desired_pairs() {
   for c in "${COMPONENTS[@]}"; do printf '%s=%s\n' "$c" "$(component_tag "$c")"; done
 }
 
+# ── Manifiestos estáticos del core ───────────────────────────────────────────
+# Un upgrade que solo mueve tags no puede entregar manifiestos nuevos (RBAC, un
+# Service). Se sincronizan los archivos base del core que NO son plantilla: los
+# que tienen ${KAANBAL_*} o @kaanbal:if necesitan el contexto con el que se
+# instaló la célula y se dejan como están. Se detectan con las mismas marcas que
+# usa installer/gitops_render.py.
+sync_static_manifests() {
+  local repo=$1 c src dst rel synced=0 skipped=()
+  for c in "${COMPONENTS[@]}"; do
+    src="$SOURCE_DIR/SOFTWARE_FACTORY/infra-gitops/apps/$c/base"
+    dst="$repo/apps/$c/base"
+    [[ -d "$src" && -d "$dst" ]] || continue
+    while IFS= read -r -d '' f; do
+      rel=${f#"$src/"}
+      if grep -qE '\$\{KAANBAL_[A-Z0-9_]+\}|@kaanbal:(if|else|endif)' "$f"; then
+        skipped+=("$c/base/$rel")
+        continue
+      fi
+      if ! cmp -s "$f" "$dst/$rel" 2>/dev/null; then
+        mkdir -p "$(dirname "$dst/$rel")"
+        cp "$f" "$dst/$rel"
+        log "  manifiesto $c/base/$rel actualizado"
+        synced=$((synced + 1))
+      fi
+    done < <(find "$src" -type f -print0)
+  done
+  ((synced == 0)) && log "  manifiestos estáticos al día"
+  ((${#skipped[@]})) && log "  plantillas no sincronizadas (requieren contexto de instalación): ${skipped[*]}"
+  return 0
+}
+
+# Revierte exactamente el commit de promoción de este upgrade, por SHA: aunque
+# alguien haya commiteado después, solo se deshace lo nuestro (tags y
+# manifiestos). Si el revert choca, se escriben los tags anteriores a mano.
+rollback_promotion() {
+  local fallback_pairs=("$@") W
+  if [[ -z "${PROMOTED_SHA:-}" ]]; then
+    promote_tags "rollback: restaurar core" "${fallback_pairs[@]}"
+    return
+  fi
+  W=$(mktemp -d)
+  git clone --quiet "https://x-access-token:$TOKEN@github.com/$ORG/infra-gitops.git" "$W/repo"
+  cd "$W/repo"
+  git config user.email "kaanbal@localhost"
+  git config user.name "Kaanbal Upgrade"
+  if git revert --no-edit "$PROMOTED_SHA" >/dev/null 2>&1; then
+    git commit --amend --quiet -m "rollback: revertir ${PROMOTED_SHA:0:7} [skip ci]"
+    git push --quiet origin HEAD:main
+    cd /; rm -rf "$W"
+    log "  revertido ${PROMOTED_SHA:0:7} (tags y manifiestos)"
+    local app
+    for app in "${COMPONENTS[@]}"; do
+      kubectl annotate application "${app}-prod" -n argocd \
+        argocd.argoproj.io/refresh=hard --overwrite >/dev/null 2>&1 || true
+    done
+  else
+    git revert --abort >/dev/null 2>&1 || true
+    cd /; rm -rf "$W"
+    warn "El revert de ${PROMOTED_SHA:0:7} chocó con otro cambio; se restauran solo los tags"
+    SYNC_MANIFESTS=0 promote_tags "rollback: restaurar core" "${fallback_pairs[@]}"
+  fi
+}
+
 # ── Promoción: escribe tags explícitos en un solo commit ─────────────────────
 # Un commit por componente daría ventanas con versiones mezcladas. Y el rollback
 # escribe los tags anteriores en vez de hacer `git revert HEAD`: el último commit
@@ -135,13 +198,16 @@ promote_tags() {
     sed -i "s|^\( *newTag:\).*|\1 $tag|" "$f"
     log "  $c → $tag"
   done
+  [[ "${SYNC_MANIFESTS:-0}" == 1 ]] && sync_static_manifests "$W/repo"
   git add -A
+  PROMOTED_SHA=""
   if git diff --cached --quiet; then
-    log "infra-gitops ya apunta a estos tags"
+    log "infra-gitops ya está al día"
     cd /; rm -rf "$W"; return 0
   fi
   git commit --quiet -m "$message [skip ci]"
   git push --quiet origin HEAD:main
+  PROMOTED_SHA=$(git rev-parse HEAD)
   cd /; rm -rf "$W"
 
   # Forzar reconciliación en vez de esperar el poll de ArgoCD.
@@ -402,8 +468,8 @@ if [[ "$PHASE" == all || "$PHASE" == promote ]]; then
   mapfile -t wanted < <(desired_pairs)
   (( ${#wanted[@]} == ${#COMPONENTS[@]} )) || die "No se pudieron resolver los tags de todos los componentes"
 
-  log "Promoviendo tags en infra-gitops"
-  promote_tags "upgrade: promover core del monorepo@${UPSTREAM:0:7}" "${wanted[@]}"
+  log "Promoviendo tags y manifiestos en infra-gitops"
+  SYNC_MANIFESTS=1 promote_tags "upgrade: promover core del monorepo@${UPSTREAM:0:7}" "${wanted[@]}"
 
   if verify "${wanted[@]}"; then
     log "✅ Upgrade verificado."
@@ -416,7 +482,7 @@ if [[ "$PHASE" == all || "$PHASE" == promote ]]; then
     snapshot | sed 's/^/  /'
   else
     warn "La verificación falló — restaurando ${before[*]}"
-    promote_tags "rollback: el upgrade a monorepo@${UPSTREAM:0:7} no verificó" "${before[@]}"
+    rollback_promotion "${before[@]}"
     if verify "${before[@]}"; then
       die "Se revirtió a la versión anterior y quedó sana. Revisa los logs del build."
     fi

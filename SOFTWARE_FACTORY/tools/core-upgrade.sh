@@ -307,9 +307,19 @@ if [[ "$PHASE" == all || "$PHASE" == sync ]]; then
   # versión recién descargada, así que el upgrade corre con la lógica más nueva.
   if [[ -z "${KAANBAL_UPGRADE_REEXEC:-}" ]]; then
     log "Actualizando el checkout a $REF"
-    git -c safe.directory="$SOURCE_DIR" -C "$SOURCE_DIR" fetch --depth 50 origin "$REF" >/dev/null 2>&1 \
-      || die "No se pudo descargar $REF del monorepo"
-    git -c safe.directory="$SOURCE_DIR" -C "$SOURCE_DIR" checkout --quiet --detach FETCH_HEAD \
+    # Git se ejecuta como el dueño del checkout: corrido como root dejaba objetos
+    # de .git con dueño root y el siguiente `git fetch` del usuario fallaba con
+    # "unpack-objects failed" (pasó en pam). En el Job el checkout es de root.
+    owner=$(stat -c %U "$SOURCE_DIR")
+    if [[ $EUID -eq 0 && "$owner" != root ]]; then
+      as_owner=(runuser -u "$owner" --)
+      command -v runuser >/dev/null || as_owner=(sudo -u "$owner")
+    else
+      as_owner=()
+    fi
+    "${as_owner[@]}" git -c safe.directory="$SOURCE_DIR" -C "$SOURCE_DIR" fetch --depth 50 origin "$REF" >/dev/null 2>&1 \
+      || die "No se pudo descargar $REF del monorepo (¿archivos de .git con otro dueño? chown -R $owner $SOURCE_DIR)"
+    "${as_owner[@]}" git -c safe.directory="$SOURCE_DIR" -C "$SOURCE_DIR" checkout --quiet --detach FETCH_HEAD \
       || die "No se pudo actualizar el checkout"
     export KAANBAL_UPGRADE_REEXEC=1 KAANBAL_SOURCE="$SOURCE_DIR"
     exec bash "$SOURCE_DIR/SOFTWARE_FACTORY/tools/core-upgrade.sh" "${ORIGINAL_ARGS[@]}"

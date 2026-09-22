@@ -159,6 +159,10 @@
                       <input type="checkbox" v-model="useRootDomain" class="w-4 h-4 rounded bg-slate-700 border-slate-600" />
                       <span>Use root domain in prod (<code>https://{{ rootDomainHost }}</code>) and assign internal name <code>homepage</code> automatically.</span>
                     </label>
+                    <p v-if="supportsRootDomain && useRootDomain" class="mt-1 text-[11px] text-amber-300/90">
+                      Kaanbal tomará la raíz de <span class="font-mono">{{ rootDomainHost }}</span>: si hoy apunta a otro
+                      servidor (por ejemplo la página de Hostinger), dejará de mostrarse y verás tu app.
+                    </p>
                     <p v-else-if="existingRootApp && selectedTemplate?.category === 'frontend'" class="mt-2 text-xs text-amber-400/80">
                       ⚠️ La raíz de <span class="font-mono">{{ rootDomainHost }}</span> ya la usa
                       <span class="font-mono font-semibold">{{ existingRootApp }}</span>. Puede haber una app raíz por dominio: elige otro dominio para usar su raíz.

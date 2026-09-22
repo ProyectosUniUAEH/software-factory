@@ -435,6 +435,70 @@ async def provision(fqdn: str, *, zone_id: str, tunnel_id: str) -> Dict[str, Any
     }
 
 
+async def ensure_apex_routed(fqdn: str, *, zone_id: str, tunnel_id: str) -> Dict[str, Any]:
+    """Enruta la raíz del dominio al túnel. Solo para apps raíz (homepage).
+
+    La raíz suele traer un A hacia el hosting del registrador (la página de
+    "Parked Domain" de Hostinger). Cloudflare no admite un CNAME junto a ese A
+    (81053) y un wildcard no cubre la raíz, así que la app raíz quedaba sana en
+    el clúster pero el dominio seguía mostrando al registrador.
+
+    A diferencia de provision(), aquí SÍ se reemplaza lo que había: desplegar
+    una app en la raíz es una decisión explícita de ocuparla. Se reporta qué se
+    reemplazó para que quede constancia.
+    """
+    config = await get_system_config()
+    token = config.get("cloudflare_token", "")
+    account_id = config.get("cloudflare_account_id", "")
+    if not token or not account_id or not zone_id or not tunnel_id:
+        raise DomainError("Faltan credenciales, zona o túnel de Cloudflare para enrutar la raíz.")
+
+    target = f"{tunnel_id}{TUNNEL_SUFFIX}"
+    replaced: List[str] = []
+    async with httpx.AsyncClient(timeout=30) as client:
+        # 1. Regla del túnel para la raíz (la wildcard *.dominio no la cubre).
+        cfg_url = f"{CF_API}/accounts/{account_id}/cfd_tunnel/{tunnel_id}/configurations"
+        cur = await client.get(cfg_url, headers=_headers(token))
+        if cur.status_code != 200:
+            raise DomainError(f"No se pudo leer la configuración del túnel (HTTP {cur.status_code}).")
+        tunnel_cfg = (cur.json().get("result") or {}).get("config") or {}
+        ingress = list(tunnel_cfg.get("ingress") or [])
+        rule_added = False
+        if not any(r.get("hostname") == fqdn for r in ingress):
+            routed = [r for r in ingress if r.get("hostname")]
+            catch_all = [r for r in ingress if not r.get("hostname")] or [{"service": "http_status:404"}]
+            tunnel_cfg["ingress"] = routed + [{"hostname": fqdn, "service": TRAEFIK_SERVICE}] + catch_all
+            put = await client.put(cfg_url, headers=_headers(token), json={"config": tunnel_cfg})
+            if put.status_code != 200:
+                raise DomainError(f"No se pudo agregar la regla del túnel para {fqdn}: {put.text[:200]}")
+            rule_added = True
+
+        # 2. DNS de la raíz: fuera lo que apunte a otro origen, CNAME al túnel.
+        records = await _records(client, token, zone_id, fqdn)
+        if any(_points_to_tunnel(r) for r in records):
+            return {"fqdn": fqdn, "replaced": [], "rule_added": rule_added, "already_routed": True}
+        for record in records:
+            if record.get("type") in ("A", "AAAA", "CNAME"):
+                resp = await client.delete(
+                    f"{CF_API}/zones/{zone_id}/dns_records/{record['id']}", headers=_headers(token),
+                )
+                if resp.status_code not in (200, 404):
+                    raise DomainError(f"No se pudo retirar {record.get('type')} {record.get('content')} de {fqdn}")
+                replaced.append(f"{record.get('type')} {record.get('content')}")
+        created = await client.post(
+            f"{CF_API}/zones/{zone_id}/dns_records", headers=_headers(token),
+            json={"type": "CNAME", "name": fqdn, "content": target, "proxied": True},
+        )
+        if created.status_code != 200:
+            errors = created.json().get("errors") or []
+            raise DomainError(
+                f"No se pudo apuntar {fqdn} al túnel: {errors[0].get('message') if errors else created.text[:200]}"
+            )
+
+    logger.info("Raíz %s enrutada al túnel (reemplazado: %s)", fqdn, replaced or "nada")
+    return {"fqdn": fqdn, "replaced": replaced, "rule_added": rule_added, "already_routed": False}
+
+
 async def deprovision(fqdn: str, *, zone_id: str, tunnel_id: str) -> Dict[str, Any]:
     """Quita reglas de tunel y DNS wildcard/raiz de un dominio que se elimina."""
     config = await get_system_config()

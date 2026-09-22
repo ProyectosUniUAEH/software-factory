@@ -353,6 +353,52 @@ class AppDomainDescriptionTests(unittest.TestCase):
         self.assertEqual(ds.claims_for(app, "a.com"), ["web.a.com"])
 
 
+class ApexTakeoverTests(unittest.TestCase):
+    """Homepage en la raíz: el caso de siboenglishnest.site y softwarefactory.site."""
+
+    BASE = [
+        {"hostname": "*.instalacion.com", "service": ds.TRAEFIK_SERVICE},
+        {"service": "http_status:404"},
+    ]
+
+    def _run(self, client):
+        db = FakeDB(system_config=CONFIG)
+        with mock.patch.object(ds, "get_db", return_value=db), \
+             mock.patch.object(ds.httpx, "AsyncClient", return_value=client):
+            return run(ds.ensure_apex_routed("instalacion.com", zone_id="z", tunnel_id="tunnel-1"))
+
+    def test_replaces_registrar_parking_record_with_the_tunnel(self):
+        client = DnsAwareClient(list(self.BASE), {
+            "instalacion.com": [{"type": "A", "content": "2.57.91.91", "id": "hostinger"}],
+        })
+        result = self._run(client)
+        self.assertEqual(result["replaced"], ["A 2.57.91.91"])
+        self.assertTrue(any(url.endswith("/dns_records/hostinger") for url in client.deleted))
+        self.assertEqual(client.posted[-1]["name"], "instalacion.com")
+        self.assertEqual(client.posted[-1]["content"], "tunnel-1.cfargotunnel.com")
+        self.assertTrue(client.posted[-1]["proxied"])
+
+    def test_adds_tunnel_rule_for_the_apex_keeping_catch_all_last(self):
+        """La wildcard *.dominio del túnel no cubre la raíz."""
+        client = DnsAwareClient(list(self.BASE), {"instalacion.com": []})
+        result = self._run(client)
+        self.assertTrue(result["rule_added"])
+        ingress = client.put_bodies[0]["config"]["ingress"]
+        self.assertIn("instalacion.com", [r.get("hostname") for r in ingress])
+        self.assertIsNone(ingress[-1].get("hostname"))
+
+    def test_already_routed_apex_is_left_alone(self):
+        client = DnsAwareClient(
+            self.BASE[:1] + [{"hostname": "instalacion.com", "service": ds.TRAEFIK_SERVICE}] + self.BASE[1:],
+            {"instalacion.com": [{"type": "CNAME", "content": "tunnel-1.cfargotunnel.com", "id": "ok"}]},
+        )
+        result = self._run(client)
+        self.assertTrue(result["already_routed"])
+        self.assertEqual(client.deleted, [])
+        self.assertEqual(client.posted, [])
+        self.assertEqual(client.put_bodies, [])
+
+
 class VerifyTests(unittest.TestCase):
     def test_reports_missing_credentials_without_calling_cloudflare(self):
         db = FakeDB(system_config=[{"_id": "main", "domain": "x.com"}])

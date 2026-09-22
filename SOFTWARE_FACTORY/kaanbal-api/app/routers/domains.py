@@ -198,6 +198,25 @@ async def repair_domain(domain_id: str):
     except domain_service.DomainError as exc:
         raise HTTPException(status_code=424, detail=str(exc))
 
+    # Si el dominio tiene una app raíz (homepage), su raíz debe apuntar al túnel
+    # aunque hoy apunte al registrador: la app ya decidió ocuparla. Así Recablear
+    # arregla homepages desplegadas antes de que el deployer tomara la raíz.
+    root_query = {"is_root_domain": True, "domain_id": domain_id}
+    if domain.get("is_default"):
+        root_query = {"is_root_domain": True, "$or": [
+            {"domain_id": domain_id}, {"domain_id": None}, {"domain_id": {"$exists": False}},
+        ]}
+    root_app = await db.apps.find_one(root_query, {"name": 1})
+    if root_app:
+        try:
+            apex_result = await domain_service.ensure_apex_routed(
+                domain["fqdn"], zone_id=zone_id, tunnel_id=tunnel_id,
+            )
+            provisioned["apex"] = {"routed": True, "root_app": root_app["name"],
+                                   "replaced": apex_result.get("replaced", [])}
+        except domain_service.DomainError as exc:
+            raise HTTPException(status_code=424, detail=str(exc))
+
     await db.domains.update_one(
         {"_id": oid},
         {"$set": {

@@ -3735,6 +3735,22 @@ patches:
                         logger.warning(f"No Cloudflare zone found for {self.domain}")
                         return False
 
+                # Un wildcard (*.dominio) no cubre la raíz. Sin esto una app raíz
+                # (homepage) quedaba sana en el clúster pero el dominio seguía
+                # mostrando la página del registrador.
+                apex = (self.domain or "").lower()
+                if apex and any(str(r).lower() == apex for r in records):
+                    from app.services import domain_service
+                    tunnel = cf_tunnel_id or await domain_service.installation_tunnel_id(
+                        client, await domain_service.get_system_config(),
+                    )
+                    taken = await domain_service.ensure_apex_routed(apex, zone_id=cf_zone_id, tunnel_id=tunnel)
+                    if taken.get("replaced"):
+                        logger.warning("Raíz %s tomada por la app raíz; se reemplazó: %s", apex, taken["replaced"])
+                    records = [r for r in records if str(r).lower() != apex]
+                    if not records:
+                        return True
+
                 # If wildcard DNS already exists, do not create per-app records.
                 wildcard_resp = await client.get(
                     f"{cf_api}/zones/{cf_zone_id}/dns_records?name=*.{self.domain}",

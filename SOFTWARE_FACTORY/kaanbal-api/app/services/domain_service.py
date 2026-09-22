@@ -12,6 +12,7 @@ por eso `provision()` **agrega** reglas al tunel existente en lugar de
 sobrescribir su configuracion.
 """
 
+import ipaddress
 import logging
 from typing import Any, Dict, List, Optional
 
@@ -43,6 +44,36 @@ def _points_to_tunnel(record: Dict[str, Any]) -> bool:
     return record.get("type") == "CNAME" and str(record.get("content") or "").endswith(TUNNEL_SUFFIX)
 
 
+# Rangos publicados por Cloudflare (https://www.cloudflare.com/ips-v4 y -v6,
+# consultados 2026-09-22). Cambian muy rara vez.
+_CLOUDFLARE_NETWORKS = [ipaddress.ip_network(n) for n in (
+    "173.245.48.0/20", "103.21.244.0/22", "103.22.200.0/22", "103.31.4.0/22",
+    "141.101.64.0/18", "108.162.192.0/18", "190.93.240.0/20", "188.114.96.0/20",
+    "197.234.240.0/22", "198.41.128.0/17", "162.158.0.0/15", "104.16.0.0/13",
+    "104.24.0.0/14", "172.64.0.0/13", "131.0.72.0/22",
+    "2400:cb00::/32", "2606:4700::/32", "2803:f800::/32", "2405:b500::/32",
+    "2405:8100::/32", "2a06:98c0::/29", "2c0f:f248::/32",
+)]
+
+
+def _is_stale_import(record: Dict[str, Any]) -> bool:
+    """A/AAAA que apunta a la propia red de Cloudflare: un resto de importación.
+
+    Cuando un dominio que ya vivía en otra cuenta de Cloudflare se agrega a esta,
+    el escaneo inicial importa lo que resolvía en público, que eran las IPs del
+    proxy de la cuenta anterior. Esas IPs nunca son un origen válido (Cloudflare
+    responde error 1000 si se usan como tal), así que reemplazarlas no puede
+    tumbar ningún sitio real. Caso real: dev-julian.space.
+    """
+    if record.get("type") not in ("A", "AAAA"):
+        return False
+    try:
+        ip = ipaddress.ip_address(str(record.get("content") or ""))
+    except ValueError:
+        return False
+    return any(ip in net for net in _CLOUDFLARE_NETWORKS)
+
+
 def _describe(records: List[Dict[str, Any]]) -> str:
     return ", ".join(f"{r.get('type')} {r.get('content')}" for r in records)
 
@@ -55,12 +86,33 @@ async def dns_conflicts(client: httpx.AsyncClient, token: str, zone_id: str, fqd
     un nombre que ya tiene A/AAAA/CNAME (codigo 81053).
     """
     def foreign(records):
-        return [r for r in records if r.get("type") in ("A", "AAAA", "CNAME") and not _points_to_tunnel(r)]
+        return [r for r in records if r.get("type") in ("A", "AAAA", "CNAME")
+                and not _points_to_tunnel(r) and not _is_stale_import(r)]
 
+    def stale(records):
+        return [r for r in records if _is_stale_import(r)]
+
+    wildcard = await _records(client, token, zone_id, f"*.{fqdn}")
+    apex = await _records(client, token, zone_id, fqdn)
     return {
-        "wildcard": foreign(await _records(client, token, zone_id, f"*.{fqdn}")),
-        "apex": foreign(await _records(client, token, zone_id, fqdn)),
+        # Conflictos reales: apuntan a un servidor que puede estar sirviendo algo.
+        "wildcard": foreign(wildcard),
+        "apex": foreign(apex),
+        # Restos de importación: apuntan a la red de Cloudflare, se reemplazan.
+        "stale": {"wildcard": stale(wildcard), "apex": stale(apex)},
     }
+
+
+async def _delete_records(client: httpx.AsyncClient, token: str, zone_id: str, records: List[Dict[str, Any]]) -> List[str]:
+    removed = []
+    for record in records:
+        resp = await client.delete(
+            f"{CF_API}/zones/{zone_id}/dns_records/{record['id']}", headers=_headers(token),
+        )
+        if resp.status_code not in (200, 404):
+            raise DomainError(f"No se pudo retirar {record.get('type')} {record.get('content')} ({record.get('name')})")
+        removed.append(f"{record.get('type')} {record.get('content')}")
+    return removed
 
 
 def _headers(token: str) -> Dict[str, str]:
@@ -181,6 +233,12 @@ async def request_activation_check(client: httpx.AsyncClient, token: str, zone_i
         )
         if resp.status_code == 200:
             return "Se pidió a Cloudflare revisar los nameservers ahora."
+        if resp.status_code == 403:
+            # El token de Kaanbal no suele tener el permiso de edición de zona que
+            # pide este atajo. No es un problema del dominio: Cloudflare revisa
+            # igual por su cuenta. Decir "Unauthorized" solo asustaba.
+            return ("Cloudflare revisará los nameservers por su cuenta (acelerarlo requiere un "
+                    "permiso de zona que el token no tiene; no es necesario). Vuelve a Validar en unos minutos.")
         errors = resp.json().get("errors") or []
         msg = errors[0].get("message") if errors else f"HTTP {resp.status_code}"
         return f"Cloudflare no aceptó revisar ahora ({msg}); lo hará en su propio ciclo."
@@ -270,6 +328,16 @@ async def verify(fqdn: str, *, tunnel_id: str = "") -> Dict[str, Any]:
             ))
         else:
             checks.append(_check("dns", "DNS existente", "ok", "Sin registros en conflicto."))
+
+        stale_found = conflicts["stale"]["wildcard"] + conflicts["stale"]["apex"]
+        if stale_found:
+            names = sorted({r.get("name") for r in stale_found})
+            checks.append(_check(
+                "dns_stale", "Registros importados de otra cuenta", "warn",
+                f"{', '.join(names)} apuntan a IPs de la propia red de Cloudflare. Se importaron "
+                "cuando el dominio vivía en otra cuenta de Cloudflare y no son un servidor real. "
+                "Kaanbal los reemplazará por el túnel al registrar el dominio.",
+            ))
 
         if zone_account and account_id and zone_account != account_id:
             checks.append(_check(
@@ -389,6 +457,14 @@ async def provision(fqdn: str, *, zone_id: str, tunnel_id: str) -> Dict[str, Any
                 tunnel_changed = True
                 created.extend(r["hostname"] for r in additions)
 
+            # Restos de importación (IPs de Cloudflare) en los nombres que se van a
+            # cablear: bloquearían el CNAME (81053) y nunca fueron un origen
+            # válido. No se restauran en el rollback, por la misma razón.
+            stale = conflicts["stale"]["wildcard"] + (conflicts["stale"]["apex"] if apex_routed else [])
+            removed_stale = await _delete_records(client, token, zone_id, stale)
+            if removed_stale:
+                logger.info("Registros importados retirados de %s: %s", fqdn, removed_stale)
+
             target = f"{tunnel_id}{TUNNEL_SUFFIX}"
             for name in wanted:
                 record = {"type": "CNAME", "name": name, "content": target, "proxied": True}
@@ -431,7 +507,7 @@ async def provision(fqdn: str, *, zone_id: str, tunnel_id: str) -> Dict[str, Any
     logger.info("Domain %s provisioned on tunnel %s (apex routed=%s)", fqdn, tunnel_id, apex_routed)
     return {
         "fqdn": fqdn, "zone_id": zone_id, "tunnel_id": tunnel_id,
-        "provisioned": created, "apex": apex,
+        "provisioned": created, "apex": apex, "removed_stale": removed_stale,
     }
 
 

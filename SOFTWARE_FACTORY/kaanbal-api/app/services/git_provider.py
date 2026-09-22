@@ -846,9 +846,13 @@ on:
     branches: [{', '.join(branches)}]
   workflow_dispatch:
 
+# Portable entre células: nada de la célula va escrito aquí. La app es el repo,
+# la cuenta de Docker Hub sale de los secrets que Kaanbal carga en el repo y el
+# infra-gitops es el de la org dueña del repo. Copiar este archivo a otra app u
+# otra célula no puede hacerla publicar en la cuenta u org equivocada.
 env:
-  APP_NAME: "{app_name}"
-  DOCKERHUB_USER: "{dockerhub_user}"
+  APP_NAME: ${{{{ github.event.repository.name }}}}
+  DOCKERHUB_USER: ${{{{ secrets.DOCKERHUB_USERNAME }}}}
 
 jobs:
   build:
@@ -902,17 +906,17 @@ jobs:
           IMAGE_TAG: ${{{{ needs.build.outputs.image_tag }}}}
           DEPLOY_ENV: ${{{{ needs.build.outputs.deploy_env }}}}
         run: |
-          git clone --depth 1 https://${{INFRA_REPO_AUTH}}@github.com/{workspace_or_org}/{infra_repo}.git
+          git clone --depth 1 https://${{INFRA_REPO_AUTH}}@github.com/${{GITHUB_REPOSITORY_OWNER}}/{infra_repo}.git
           cd {infra_repo}
           git config user.email "{pipeline_email}"
           git config user.name "GitHub Actions"
 
-          cd apps/{app_name}/overlays/$DEPLOY_ENV
-          sed -i "s|newName.*|newName: {dockerhub_user}/{app_name}|g" kustomization.yaml
+          cd apps/${{APP_NAME}}/overlays/$DEPLOY_ENV
+          sed -i "s|newName.*|newName: ${{DOCKERHUB_USER}}/${{APP_NAME}}|g" kustomization.yaml
           sed -i "s/newTag.*/newTag: $IMAGE_TAG/g" kustomization.yaml
 
           git add kustomization.yaml
-          git commit -m "deploy($DEPLOY_ENV): {app_name} to $IMAGE_TAG [skip ci]"
+          git commit -m "deploy($DEPLOY_ENV): ${{APP_NAME}} to $IMAGE_TAG [skip ci]"
           cd ../../../../
 
           # Retry push with rebase

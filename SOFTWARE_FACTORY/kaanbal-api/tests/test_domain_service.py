@@ -353,6 +353,39 @@ class AppDomainDescriptionTests(unittest.TestCase):
         self.assertEqual(ds.claims_for(app, "a.com"), ["web.a.com"])
 
 
+class StaleImportTests(unittest.TestCase):
+    """dev-julian.space: el dominio venía de otra cuenta de Cloudflare y el escaneo
+    importó las IPs del proxy de esa cuenta como si fueran el origen."""
+
+    IMPORTED = [
+        {"type": "A", "content": "172.67.166.2", "id": "i1", "name": "*.nuevo.com"},
+        {"type": "A", "content": "104.21.11.119", "id": "i2", "name": "*.nuevo.com"},
+        {"type": "AAAA", "content": "2606:4700:3036::ac43:a602", "id": "i3", "name": "*.nuevo.com"},
+    ]
+
+    def test_cloudflare_edge_ips_are_stale_imports(self):
+        for record in self.IMPORTED:
+            self.assertTrue(ds._is_stale_import(record), record["content"])
+
+    def test_real_origins_are_not_stale(self):
+        """El A de Hostinger (uaeh) sí es un sitio real y se respeta."""
+        self.assertFalse(ds._is_stale_import({"type": "A", "content": "2.57.91.91"}))
+        self.assertFalse(ds._is_stale_import({"type": "CNAME", "content": "sitio.hostinger.com"}))
+
+    def test_provision_replaces_imported_wildcard_instead_of_blocking(self):
+        client = DnsAwareClient(
+            [{"hostname": "*.instalacion.com", "service": ds.TRAEFIK_SERVICE}, {"service": "http_status:404"}],
+            {"*.nuevo.com": self.IMPORTED, "nuevo.com": []},
+        )
+        db = FakeDB(system_config=CONFIG)
+        with mock.patch.object(ds, "get_db", return_value=db), \
+             mock.patch.object(ds.httpx, "AsyncClient", return_value=client):
+            result = run(ds.provision("nuevo.com", zone_id="z", tunnel_id="tunnel-1"))
+        self.assertEqual(len(result["removed_stale"]), 3)
+        self.assertEqual(len(client.deleted), 3)
+        self.assertIn("*.nuevo.com", [p["name"] for p in client.posted])
+
+
 class ApexTakeoverTests(unittest.TestCase):
     """Homepage en la raíz: el caso de siboenglishnest.site y softwarefactory.site."""
 

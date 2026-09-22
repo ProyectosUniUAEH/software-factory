@@ -851,6 +851,9 @@ class _AppShim:
         self.category = app_doc.get("category")
         self.environments = app_doc.get("environments") or ["prod"]
         self.template_config = app_doc.get("template_config") or {}
+        # El homepage vive en la raíz del dominio: sin este dato los overlays y
+        # el DNS se regeneraban como <app>.<dominio>.
+        self.is_root_domain = bool(app_doc.get("is_root_domain"))
         self.exposure = _ExposureShim(exposure)
         specs = app_doc.get("specs") or {}
         self.specs = type("S", (), {"replicas": specs.get("replicas", 1), "port": specs.get("port", 80)})()

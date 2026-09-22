@@ -159,6 +159,7 @@ async def list_apps():
         app["_id"] = str(app["_id"])
         app["domain"] = domain_service.describe_app_domain(app, index)
         app["domain_move"] = _domain_move_view(app.get("domain_move"))
+        app["root_promotion"] = _root_promotion_view(app.get("root_promotion"))
     return apps
 
 
@@ -171,6 +172,7 @@ async def get_app(app_name: str):
         raise HTTPException(status_code=404, detail="App not found")
     app["_id"] = str(app["_id"])
     app["domain"] = domain_service.describe_app_domain(app, await domain_service.domains_index())
+    app["root_promotion"] = _root_promotion_view(app.get("root_promotion"))
     return app
 
 
@@ -200,19 +202,32 @@ async def _host_collisions(db, app: dict, target_fqdn: str) -> list:
 DOMAIN_MOVE_STALE_SECONDS = 15 * 60
 
 
-def _domain_move_view(move: dict | None) -> dict | None:
-    if not move:
+def _task_view(task: dict | None, interrupted: str) -> dict | None:
+    """Estado de una operación larga, tal como debe verlo la consola.
+
+    Un 'running' que sobrevive al reinicio de la API no volverá solo: pasado el
+    plazo se reporta como interrumpido en vez de girar para siempre.
+    """
+    if not task:
         return None
-    view = dict(move)
-    started = move.get("started_at")
-    if move.get("state") == "running" and isinstance(started, datetime):
+    view = dict(task)
+    started = task.get("started_at")
+    if task.get("state") == "running" and isinstance(started, datetime):
         if (datetime.utcnow() - started).total_seconds() > DOMAIN_MOVE_STALE_SECONDS:
             view["state"] = "interrupted"
-            view["error"] = "La mudanza se interrumpió (la API se reinició). Revisa la exposición y reintenta."
+            view["error"] = interrupted
     for key in ("started_at", "finished_at"):
         if isinstance(view.get(key), datetime):
             view[key] = view[key].isoformat() + "Z"
     return view
+
+
+def _domain_move_view(move: dict | None) -> dict | None:
+    return _task_view(move, "La mudanza se interrumpió (la API se reinició). Revisa la exposición y reintenta.")
+
+
+def _root_promotion_view(promotion: dict | None) -> dict | None:
+    return _task_view(promotion, "La conversión se interrumpió (la API se reinició). Revisa la exposición y reintenta.")
 
 
 async def _move_domain_in_background(app: dict, per_env: dict, target: dict, actor: str):
@@ -321,6 +336,124 @@ async def change_app_domain(
     )
     background_tasks.add_task(_move_domain_in_background, app, per_env, target, current_user.username)
     return {"app": app_name, "move": _domain_move_view(move)}
+
+
+async def _promote_to_root_in_background(app: dict, fqdn: str, actor: str):
+    """Rehacer la exposición de prod con la app ya en la raíz del dominio.
+
+    Reusa la coreografía de exposición: reescribe el Ingress con el dominio
+    desnudo, enruta la raíz en el túnel (un wildcard no la cubre) y prueba la
+    URL. El documento se marca como raíz solo si todo eso salió bien.
+    """
+    db = get_db()
+    app_name = app["name"]
+    promoted = {**app, "is_root_domain": True}
+    try:
+        result = await _run_switch(
+            promoted, per_env={"prod": "public"}, port_exposure=None,
+            target_domain_id=None, actor=actor,
+        )
+        await db.apps.update_one({"name": app_name}, {"$set": {
+            "is_root_domain": True,
+            "dns_claims": _derive_claims_from_existing_app({**promoted, "dns_claims": None}, fqdn),
+            "root_promotion.state": "succeeded" if result.get("validated") else "pending",
+            "root_promotion.url": f"https://{fqdn}",
+            "root_promotion.finished_at": datetime.utcnow(),
+        }})
+    except Exception as exc:
+        logger.exception("homepage promotion failed for %s", app_name)
+        await db.apps.update_one({"name": app_name}, {"$set": {
+            "root_promotion.state": "failed",
+            "root_promotion.error": str(exc)[:300],
+            "root_promotion.finished_at": datetime.utcnow(),
+        }})
+
+
+@router.post("/{app_name}/homepage", status_code=202)
+async def promote_app_to_homepage(
+    app_name: str,
+    background_tasks: BackgroundTasks,
+    current_user: User = Depends(get_current_active_user),
+):
+    """Convertir una app existente en el homepage de su dominio.
+
+    Nadie tiene que relanzar ni renombrar nada: la app conserva su nombre, su
+    repo y sus secretos, y su prod pasa de <app>.<dominio> a la raíz. Responde
+    202 porque el cambio incluye DNS y un probe; la consola sigue el estado en
+    GET /{app_name}/homepage.
+    """
+    db = get_db()
+    app = await db.apps.find_one({"name": app_name})
+    if not app:
+        raise HTTPException(status_code=404, detail="App not found")
+    if app.get("is_root_domain"):
+        raise HTTPException(status_code=409, detail=f"{app_name} ya es el homepage de su dominio.")
+
+    promotion = _root_promotion_view(app.get("root_promotion"))
+    if promotion and promotion.get("state") == "running":
+        raise HTTPException(status_code=409, detail="Ya hay una conversión en curso para esta app.")
+
+    index = await domain_service.domains_index()
+    current = domain_service.describe_app_domain(app, index)
+    fqdn = current.get("fqdn") or ""
+    if not fqdn:
+        raise HTTPException(status_code=400, detail="La app no tiene dominio: regístralo antes de darle la raíz.")
+    if (current["modes"] or {}).get("prod") not in domain_service.PUBLIC_MODES:
+        raise HTTPException(
+            status_code=422,
+            detail=(
+                f"El homepage ocupa {fqdn}, así que su prod tiene que ser pública. "
+                "Cámbiala en 'Manage exposure' y vuelve a intentarlo."
+            ),
+        )
+
+    # Una sola raíz por dominio: la del dominio de esta app.
+    for other in await db.apps.find({"is_root_domain": True}).to_list(100):
+        if other.get("name") == app_name:
+            continue
+        if domain_service.describe_app_domain(other, index).get("fqdn") == fqdn:
+            raise HTTPException(
+                status_code=409,
+                detail=f"La raíz de {fqdn} ya la ocupa '{other['name']}'. Solo puede haber un homepage por dominio.",
+            )
+
+    # El apex es un host más: si otra app lo reclamó, se ve aquí antes de tocar DNS.
+    collisions = await _host_collisions(db, {**app, "is_root_domain": True}, fqdn)
+    if collisions:
+        first = collisions[0]
+        raise HTTPException(
+            status_code=409,
+            detail=f"{', '.join(first['hosts'])} ya lo usa la app '{first['app']}' en {fqdn}.",
+        )
+
+    promotion = {
+        "state": "running",
+        "fqdn": fqdn,
+        "from": domain_service.public_host(app_name, "prod", fqdn),
+        "actor": current_user.username,
+        "started_at": datetime.utcnow(),
+    }
+    await db.apps.update_one({"name": app_name}, {"$set": {"root_promotion": promotion}})
+    await activity_log.log(
+        "app.homepage.promotion.started", category=CATEGORY_APP, actor=current_user.username,
+        target=app_name, detail={"fqdn": fqdn},
+    )
+    background_tasks.add_task(_promote_to_root_in_background, app, fqdn, current_user.username)
+    return {"app": app_name, "promotion": _root_promotion_view(promotion)}
+
+
+@router.get("/{app_name}/homepage")
+async def get_app_homepage_promotion(app_name: str):
+    """Estado de la conversión de una app en homepage de su dominio."""
+    db = get_db()
+    app = await db.apps.find_one({"name": app_name}, {"name": 1, "is_root_domain": 1, "root_promotion": 1})
+    if not app:
+        raise HTTPException(status_code=404, detail="App not found")
+    return {
+        "app": app_name,
+        "is_root_domain": bool(app.get("is_root_domain")),
+        "promotion": _root_promotion_view(app.get("root_promotion")),
+    }
 
 
 @router.post("", status_code=202)
@@ -1326,6 +1459,75 @@ async def update_app_group(app_name: str, body: dict, current_user: User = Depen
         "name": app_name,
         "app_group": normalized_group,
         "message": "Group updated" if normalized_group else "Group cleared",
+    }
+
+
+@router.patch("/{app_name}/display-name")
+async def update_app_display_name(app_name: str, body: dict, current_user: User = Depends(get_current_active_user)):
+    """Cambiar el nombre con el que se ve una app en la consola.
+
+    El nombre interno no se toca: es la identidad de la app en su repositorio,
+    en el clúster, en DNS y en Vault, y renombrarlo en caliente rompería las
+    cuatro cosas a la vez. Esto cubre el caso real —"la lancé con un nombre y
+    ahora quiero que se llame de otra forma"— sin tocar nada de eso.
+    """
+    db = get_db()
+    app = await db.apps.find_one({"name": app_name}, {"name": 1})
+    if not app:
+        raise HTTPException(status_code=404, detail="App not found")
+
+    display_name = " ".join(str(body.get("display_name") or "").split())[:60]
+    await db.apps.update_one(
+        {"name": app_name},
+        {"$set": {"display_name": display_name or None, "updated_at": datetime.utcnow()}},
+    )
+    await activity_log.log(
+        "app.display_name.updated", category=CATEGORY_APP, actor=current_user.username,
+        target=app_name, detail={"display_name": display_name or None},
+    )
+    return {
+        "name": app_name,
+        "display_name": display_name or None,
+        "message": f"Ahora se muestra como '{display_name}'" if display_name else "Vuelve a mostrarse con su nombre interno",
+    }
+
+
+@router.post("/{app_name}/bindings/repair")
+async def repair_app_bindings(app_name: str, current_user: User = Depends(get_current_active_user)):
+    """Publicar los nombres convencionales de la base vinculada en una app ya desplegada.
+
+    Kaanbal inyecta las credenciales con el prefijo del nombre de la base
+    (RINCON_DEL_MAR_BD_URI). Una app escrita contra MONGO_URI o DATABASE_URL
+    —los nombres que usa todo el mundo— no arranca aunque el vínculo esté bien.
+    Las apps nuevas ya reciben ambos; esto se lo agrega a las que no los tienen.
+    """
+    db = get_db()
+    app = await db.apps.find_one({"name": app_name}, {"name": 1, "environments": 1})
+    if not app:
+        raise HTTPException(status_code=404, detail="App not found")
+
+    deployer = AppDeployer()
+    try:
+        report = await deployer.repair_db_bindings(app_name, app.get("environments") or ["prod"])
+    except Exception as e:
+        logger.error(f"Bindings repair failed for {app_name}: {e}")
+        raise HTTPException(status_code=502, detail=f"No se pudieron publicar las variables: {e}")
+
+    await activity_log.log(
+        "app.bindings.repaired",
+        category=CATEGORY_APP,
+        actor=current_user.username,
+        target=app_name,
+        detail=report,
+    )
+
+    added = sorted({name for env in report["environments"].values() for name in env.get("added", [])})
+    return {
+        **report,
+        "message": (
+            f"Publicadas {len(added)} variable(s): {', '.join(added)}. ArgoCD reiniciará la app."
+            if added else "La app ya tenía los nombres de conexión del motor."
+        ),
     }
 
 

@@ -60,6 +60,7 @@ class ScaffoldUnavailableError(Exception):
 
 from app.models import AppCreate, WebhookDeployRequest, CreationMode
 from app.db import get_db
+from app.services import db_env
 from app.services.template_service import TemplateService
 from app.services.template_spec import TemplateSpec
 from app.services.git_provider import GitProvider, get_git_provider, build_provider_from_config
@@ -326,6 +327,12 @@ class AppDeployer:
         return {k: v for k, v in merged.items() if v != ""}
 
     def _is_root_domain_request(self, app_data: AppCreate) -> bool:
+        # Una app ya creada lo lleva en su documento (is_root_domain); el Wizard
+        # lo manda en template_config al crearla. Sin mirar lo primero, cualquier
+        # operación posterior —reexponer, mudar de dominio, agregar ambiente—
+        # reconstruía el homepage como <app>.<dominio> y lo sacaba de la raíz.
+        if bool(getattr(app_data, "is_root_domain", False)):
+            return True
         cfg = getattr(app_data, "template_config", {}) or {}
         for key in ("use_root_domain", "root_domain", "is_root_app"):
             val = cfg.get(key)
@@ -3269,6 +3276,7 @@ spec:
         result: dict[str, dict] = {}
         for backend_env, bindings in bindings_per_env.items():
             env_vars: dict[str, str] = {}
+            resolved: list[tuple[str, dict]] = []  # (motor, componentes) para los nombres convencionales
             for b in bindings:
                 db_app = b["app_name"]
                 db_env = b["env"]
@@ -3301,6 +3309,7 @@ spec:
                     if val is None or val == "":
                         continue
                     env_vars[f"{alias}_{key}"] = str(val)
+                resolved.append((template_id, conn))
 
                 # n8n (and similar) expect DB_TYPE + DB_POSTGRESDB_* — not only DB_HOST.
                 consumer_tpl = (getattr(app_data, "template", None) or "").lower()
@@ -3328,6 +3337,12 @@ spec:
                         f"{backend_env}: linked {db_app}/{db_env} as {alias} ({template_id})",
                         "success",
                     )
+            # Nombres convencionales del motor (MONGO_URI, DATABASE_URL, PGHOST...):
+            # la app no tiene por qué saber cómo se llama la base en esta
+            # instalación. Nunca pisan una variable ya definida.
+            for name, value in db_env.canonical_aliases(resolved).items():
+                env_vars.setdefault(name, value)
+
             if env_vars:
                 result[backend_env] = env_vars
 
@@ -3463,6 +3478,67 @@ secretGenerator:
 
         with open(overlay_kust, 'w') as f:
             f.write(content)
+
+    def _read_overlay_literals(self, infra_path: str, app_name: str, env: str) -> Optional[dict]:
+        """Variables que el overlay de un ambiente inyecta hoy en la app.
+
+        Lee el primer bloque `literals:` del secretGenerator, que es el que
+        escribe _patch_overlay_secrets. None = la app no tiene ese overlay.
+        """
+        overlay_kust = os.path.join(infra_path, "apps", app_name, "overlays", env, "kustomization.yaml")
+        if not os.path.exists(overlay_kust):
+            return None
+
+        with open(overlay_kust, "r") as f:
+            return db_env.parse_kustomize_literals(f.read())
+
+    async def repair_db_bindings(self, app_name: str, environments: list) -> dict:
+        """Publicar los nombres convencionales del motor en una app ya desplegada.
+
+        Las variables de un vínculo se escriben en el overlay al crear la app,
+        así que una app creada antes de esto solo tiene las del prefijo
+        (RINCON_DEL_MAR_BD_URI) y su código, que pide MONGO_URI, no arranca.
+        Relee lo que ya está inyectado —ahí está el vínculo—, agrega lo que
+        falta y lo deja en infra-gitops; ArgoCD hace el resto.
+
+        No toca ninguna variable existente: solo agrega nombres que no estaban.
+        """
+        await self._load_credentials()
+        infra_path = os.path.join(self.workspace, "infra-gitops")
+        if os.path.exists(infra_path):
+            shutil.rmtree(infra_path)
+        subprocess.run(
+            ["git", "clone", self.provider.get_auth_clone_url("infra-gitops"), infra_path],
+            check=True, capture_output=True,
+        )
+
+        report: dict = {"app": app_name, "environments": {}, "added": 0, "committed": False}
+        changed: list = []
+        try:
+            for env in environments:
+                literals = self._read_overlay_literals(infra_path, app_name, env)
+                if literals is None:
+                    report["environments"][env] = {"status": "sin_overlay", "added": []}
+                    continue
+                missing = db_env.missing_aliases(literals)
+                if not missing:
+                    report["environments"][env] = {"status": "al_dia", "added": []}
+                    continue
+                self._patch_overlay_secrets(infra_path, app_name, env, {env: {**literals, **missing}})
+                report["environments"][env] = {"status": "actualizado", "added": sorted(missing)}
+                report["added"] += len(missing)
+                changed.append(env)
+
+            if changed:
+                await self._push_infra(
+                    infra_path, app_name, changed,
+                    message=f"fix({app_name}): nombres de conexión del motor en {', '.join(changed)}",
+                )
+                report["committed"] = True
+        finally:
+            shutil.rmtree(infra_path, ignore_errors=True)
+
+        return report
 
     def _create_basic_overlay(self, overlay_path: str, app_name: str, env: str, app_data: AppCreate = None, workload_kind: str = "Deployment"):
         """Crear un overlay básico si no existe en el template"""
@@ -3615,9 +3691,10 @@ patches:
                 f"kustomize build OK for {app_name} overlays: {', '.join(validated)}"
             )
 
-    async def _push_infra(self, infra_path: str, app_name: str, environments: list):
+    async def _push_infra(self, infra_path: str, app_name: str, environments: list, message: str = None):
         """Commit y push cambios a infra-gitops"""
         envs_str = ", ".join(environments)
+        commit_message = message or f"feat: Add {app_name} to apps ({envs_str})"
 
         # Pre-push validation: kustomize build of every generated overlay.
         # Fails loud BEFORE the commit so we never push a YAML that ArgoCD
@@ -3637,7 +3714,7 @@ patches:
         
         # Commit — may fail if no changes (that's OK)
         commit_result = subprocess.run(
-            ["git", "commit", "-m", f"feat: Add {app_name} to apps ({envs_str})"],
+            ["git", "commit", "-m", commit_message],
             cwd=infra_path, capture_output=True, text=True
         )
         if commit_result.returncode != 0:

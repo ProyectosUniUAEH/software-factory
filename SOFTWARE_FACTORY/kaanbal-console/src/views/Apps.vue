@@ -245,7 +245,9 @@
                   </div>
                   <h3 class="text-2xl font-bold text-white truncate">{{ site.domain.fqdn }}</h3>
                   <p class="text-xs text-slate-500 mt-0.5">
-                    Homepage: <span class="text-slate-400 font-mono">{{ site.homepage.name }}</span> · {{ site.homepage.type }}
+                    Homepage: <span class="text-slate-400">{{ appLabel(site.homepage) }}</span>
+                    <span v-if="site.homepage.display_name" class="font-mono text-slate-600"> ({{ site.homepage.name }})</span>
+                    · {{ site.homepage.type }}
                   </p>
                 </div>
               </div>
@@ -324,7 +326,7 @@
                         :title="member.domain?.public ? getAppUrl(member) : 'Privada · ' + privateLabel(member)"
                       >
                         <span :class="['w-2 h-2 rounded-full shrink-0', getEnvDot(member, primaryEnv(member))]"></span>
-                        <span class="font-mono text-slate-200 truncate">{{ member.name }}</span>
+                        <span class="font-mono text-slate-200 truncate">{{ appLabel(member) }}</span>
                         <span v-if="lane.id === 'frontend'" class="ml-auto shrink-0 text-[9px] px-1.5 py-0.5 rounded bg-amber-500/15 text-amber-300 border border-amber-500/25">raíz</span>
                         <span v-else-if="!member.domain?.public" class="ml-auto shrink-0 text-[9px] text-slate-500">🔒 {{ privateLabel(member) }}</span>
                       </button>
@@ -357,25 +359,42 @@
             </div>
           </template>
 
-          <!-- Dominio sin homepage -->
+          <!-- Dominio sin homepage: crear una, o darle la raíz a una app que ya existe -->
           <div v-else class="p-5 flex items-center justify-between gap-4 flex-wrap">
             <div class="flex items-center gap-3 min-w-0">
               <span class="text-2xl opacity-60">🌐</span>
               <div class="min-w-0">
                 <p class="text-base font-semibold text-slate-200 truncate">{{ site.domain.fqdn }}</p>
-                <p class="text-xs text-slate-500">
+                <p v-if="sitePromotion(site)" class="text-xs text-sky-300 flex items-center gap-1.5">
+                  <span class="animate-spin inline-block">⏳</span>
+                  Convirtiendo <span class="font-mono">{{ sitePromotion(site).name }}</span> en el homepage…
+                </p>
+                <p v-else class="text-xs text-slate-500">
                   Todavía no tiene homepage.
                   <span v-if="site.homepageName">Se creará como <span class="font-mono text-slate-400">{{ site.homepageName }}</span>, en el grupo <span class="font-mono text-slate-400">{{ site.plannedGroup }}</span>.</span>
                 </p>
               </div>
             </div>
-            <button
-              @click="createHomepage(site)"
-              class="px-4 py-2 rounded-xl text-sm font-semibold border transition-colors"
-              :class="site.domain.is_default
-                ? 'border-amber-500/40 text-amber-200 bg-amber-500/10 hover:bg-amber-500/20'
-                : 'border-purple-500/40 text-purple-200 bg-purple-500/10 hover:bg-purple-500/20'"
-            >+ Crear homepage</button>
+            <div v-if="!sitePromotion(site)" class="flex items-center gap-2 flex-wrap">
+              <select
+                v-if="promotableApps(site).length"
+                @change="promoteToHomepage(site, $event.target.value); $event.target.value = ''"
+                class="bg-slate-900/80 border border-white/10 rounded-xl px-3 py-2 text-xs text-slate-300"
+                title="Darle la raíz del dominio a una app que ya está desplegada"
+              >
+                <option value="">Usar una app existente…</option>
+                <option v-for="candidate in promotableApps(site)" :key="candidate.id" :value="candidate.name">
+                  {{ candidate.name }}
+                </option>
+              </select>
+              <button
+                @click="createHomepage(site)"
+                class="px-4 py-2 rounded-xl text-sm font-semibold border transition-colors"
+                :class="site.domain.is_default
+                  ? 'border-amber-500/40 text-amber-200 bg-amber-500/10 hover:bg-amber-500/20'
+                  : 'border-purple-500/40 text-purple-200 bg-purple-500/10 hover:bg-purple-500/20'"
+              >+ Crear homepage</button>
+            </div>
           </div>
         </div>
       </section>
@@ -438,7 +457,8 @@
                   </div>
                 </div>
                 <div>
-                  <h3 class="font-bold text-white text-xl group-hover:text-blue-400 transition-colors">{{ app.name }}</h3>
+                  <h3 class="font-bold text-white text-xl group-hover:text-blue-400 transition-colors">{{ app.display_name || app.name }}</h3>
+                  <p v-if="app.display_name" class="text-[10px] text-slate-500 font-mono">{{ app.name }}</p>
                   <p class="text-xs text-slate-500 font-medium uppercase tracking-wider">
                     {{ app.type }}<span v-if="app.is_root_domain" class="ml-1.5 normal-case text-amber-300">· raíz del dominio</span>
                   </p>
@@ -464,11 +484,23 @@
                     <button @click="openExposureManager(app); app.showMenu = false" class="w-full px-4 py-3 text-left text-sm hover:bg-white/5 flex items-center gap-3">
                       <span>⚙</span> Manage exposure
                     </button>
+                    <button @click="promptDisplayName(app); app.showMenu = false" class="w-full px-4 py-3 text-left text-sm hover:bg-white/5 flex items-center gap-3">
+                      <span>✏️</span> Cambiar nombre visible
+                    </button>
                     <button @click="promptSetGroup(app); app.showMenu = false" class="w-full px-4 py-3 text-left text-sm hover:bg-white/5 flex items-center gap-3">
                       <span>🗂️</span> Set Group
                     </button>
                     <button v-if="app.app_group" @click="clearGroup(app); app.showMenu = false" class="w-full px-4 py-3 text-left text-sm hover:bg-white/5 flex items-center gap-3 text-amber-300">
                       <span>🧹</span> Clear Group
+                    </button>
+                    <button
+                      v-if="appRole(app) !== 'database'"
+                      @click="repairBindings(app); app.showMenu = false"
+                      :disabled="bindingsRepairing === app.name"
+                      class="w-full px-4 py-3 text-left text-sm hover:bg-white/5 flex items-center gap-3 disabled:opacity-50"
+                      title="Publica MONGO_URI / DATABASE_URL y demás nombres estándar de la base vinculada"
+                    >
+                      <span>🔌</span> {{ bindingsRepairing === app.name ? 'Publicando…' : 'Reconectar base de datos' }}
                     </button>
                     <button v-if="app.argocd?.isDegraded" @click="analyzeApp(app); app.showMenu = false" class="w-full px-4 py-3 text-left text-sm hover:bg-white/5 flex items-center gap-3 text-purple-400">
                       <span>🔍</span> AI Analysis
@@ -1600,13 +1632,20 @@ const appRole = (app) => {
 
 const sameGroup = (a, b) => !!a && !!b && a.toLowerCase() === b.toLowerCase()
 
+// El nombre interno identifica la app en repo, clúster, DNS y Vault; el visible
+// es el que eligió quien la lanzó (y puede cambiar sin tocar nada de eso).
+const appLabel = (app) => app?.display_name || app?.name || ''
+
+// Sin la lista de dominios (API sin actualizar o error) queda el de Kaanbal.
+const siteDomains = computed(() => availableDomains.value.length
+  ? availableDomains.value
+  : [{ _id: null, fqdn: getPublicDomain(), is_default: true }])
+const defaultDomainId = computed(() => siteDomains.value.find(d => d.is_default)?._id || null)
+const appDomainId = (app) => app.domain?.id || app.domain_id || defaultDomainId.value
+
 const sites = computed(() => {
-  // Sin la lista de dominios (API sin actualizar o error) queda el de Kaanbal.
-  const domains = availableDomains.value.length
-    ? availableDomains.value
-    : [{ _id: null, fqdn: getPublicDomain(), is_default: true }]
-  const defaultId = domains.find(d => d.is_default)?._id || null
-  const domainOf = (app) => app.domain?.id || app.domain_id || defaultId
+  const domains = siteDomains.value
+  const domainOf = appDomainId
   const roots = apps.value.filter(a => a.is_root_domain)
   const takenNames = apps.value.map(a => a.name)
 
@@ -1715,6 +1754,64 @@ const linkToSite = async (site, appName) => {
 
 const createHomepage = (site) => {
   router.push({ path: '/wizard', query: site.domain._id ? { site: site.domain._id } : { site: 'default' } })
+}
+
+// ── Convertir una app existente en el homepage de su dominio ─────────────
+// No hace falta relanzarla ni renombrarla: conserva nombre, repo y secretos,
+// y su prod pasa de <app>.<dominio> a la raíz.
+const promotableApps = (site) => apps.value.filter(app =>
+  !app.is_root_domain
+  && appDomainId(app) === (site.domain._id || null)
+  && app.domain?.public
+  && appRole(app) !== 'database'
+).sort((a, b) => a.name.localeCompare(b.name))
+
+const sitePromotion = (site) => apps.value.find(app =>
+  app.root_promotion?.state === 'running' && appDomainId(app) === (site.domain._id || null)
+) || null
+
+const PROMOTION_POLL_MS = 3000
+let promotionTimer = null
+
+const stopPromotionPoll = () => { clearInterval(promotionTimer); promotionTimer = null }
+
+const pollPromotion = (appName) => {
+  stopPromotionPoll()
+  promotionTimer = setInterval(async () => {
+    try {
+      const { data } = await axios.get(`/api/v1/apps/${appName}/homepage`)
+      const state = data.promotion?.state
+      if (state === 'running') return
+      stopPromotionPoll()
+      await fetchApps()
+      if (state === 'succeeded' || state === 'pending') {
+        showToast('success', 'Homepage listo', `${appName} responde en ${data.promotion?.url || 'la raíz del dominio'}`)
+      } else {
+        showToast('error', 'No se pudo convertir', data.promotion?.error || 'Revisa la exposición y reintenta.')
+      }
+    } catch (e) {
+      // Un error de red puntual no cancela la conversión, que corre en el servidor.
+    }
+  }, PROMOTION_POLL_MS)
+}
+
+const promoteToHomepage = async (site, appName) => {
+  const app = apps.value.find(a => a.name === appName)
+  if (!app) return
+  const from = primaryHost(app) || app.name
+  const ok = window.confirm(
+    `${appName} pasará a responder en https://${site.domain.fqdn} (hoy responde en ${from}).\n\n` +
+    'Conserva su nombre, su repositorio y sus secretos. ¿Continuar?'
+  )
+  if (!ok) return
+  try {
+    await axios.post(`/api/v1/apps/${appName}/homepage`)
+    await fetchApps()
+    showToast('info', 'Convirtiendo en homepage', `${appName} está tomando la raíz de ${site.domain.fqdn}. Puede tardar un minuto.`)
+    pollPromotion(appName)
+  } catch (e) {
+    showToast('error', 'No se pudo convertir', e.response?.data?.detail || 'Intenta de nuevo')
+  }
 }
 
 const regularApps = computed(() => {
@@ -2676,6 +2773,42 @@ const updateAppGroup = async (app, groupValue) => {
   app.app_group = groupValue || null
 }
 
+// El nombre interno es la identidad de la app (repo, clúster, DNS, Vault) y no
+// se puede cambiar en caliente; el visible sí, y es lo que se ve en la consola.
+const promptDisplayName = async (app) => {
+  const next = window.prompt(
+    `Nombre visible de ${app.name}\n\n` +
+    'Solo cambia cómo se muestra aquí: su repositorio, su URL y sus secretos siguen usando el nombre interno.\n' +
+    'Déjalo vacío para volver al nombre interno.',
+    app.display_name || '',
+  )
+  if (next === null) return
+  try {
+    const { data } = await axios.patch(`/api/v1/apps/${app.name}/display-name`, { display_name: next })
+    app.display_name = data.display_name
+    showToast('success', 'Nombre actualizado', data.message)
+  } catch (e) {
+    showToast('error', 'Nombre', e.response?.data?.detail || 'No se pudo cambiar el nombre visible')
+  }
+}
+
+// Kaanbal inyecta la base con el prefijo de su nombre (RINCON_DEL_MAR_BD_URI).
+// Una app escrita contra MONGO_URI o DATABASE_URL no arranca aunque el vínculo
+// esté bien: esto le publica también los nombres estándar del motor.
+const bindingsRepairing = ref('')
+const repairBindings = async (app) => {
+  bindingsRepairing.value = app.name
+  try {
+    const { data } = await axios.post(`/api/v1/apps/${app.name}/bindings/repair`)
+    showToast(data.added ? 'success' : 'info', 'Variables de la base', data.message)
+    if (data.added) fetchApps()
+  } catch (e) {
+    showToast('error', 'Variables de la base', e.response?.data?.detail || 'No se pudo publicar las variables')
+  } finally {
+    bindingsRepairing.value = ''
+  }
+}
+
 const promptSetGroup = async (app) => {
   const current = app.app_group || ''
   const next = window.prompt('Group name for this app (empty to cancel):', current)
@@ -2725,12 +2858,14 @@ const fetchApps = async () => {
       return {
         id: app._id,
         name: app.name,
+        display_name: app.display_name || null,
         app_group: app.app_group || null,
         // Sin esto el modal de exposición creía que toda app vivía en el dominio
         // default y proponía "mudar" a donde ya estaba.
         domain_id: app.domain_id || null,
         domain: app.domain || null,
         domain_move: app.domain_move || null,
+        root_promotion: app.root_promotion || null,
         type,
         status: 'Checking...',
         url: app.subdomain ? `https://${app.subdomain}` : app.repo_url,
@@ -2785,6 +2920,7 @@ watch(() => modals.details.show, (isOpen) => {
 onUnmounted(() => {
   stopDetailsPolling()
   stopDomainMovePoll()
+  stopPromotionPoll()
   window.removeEventListener('kaanbal:sync-complete', onGlobalSyncComplete)
 })
 </script>

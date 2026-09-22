@@ -615,6 +615,65 @@ async def deprovision(fqdn: str, *, zone_id: str, tunnel_id: str) -> Dict[str, A
 
 
 PUBLIC_MODES = ("public", "both")
+ROOT_APP_SUFFIX = "-homepage"
+
+
+def site_slug(fqdn: str, *, full: bool = False) -> str:
+    """Identidad de un sitio a partir de su dominio: 'uaeh-genomicaygenetica.site' → 'uaeh-genomicaygenetica'.
+
+    Se usa la primera etiqueta: es la parte reconocible del dominio y evita nombres
+    como 'uaeh-genomicaygenetica-site-homepage'. Con ``full`` entra el dominio
+    completo ('sibo.store' → 'sibo-store'), para desempatar dominios que
+    comparten la primera etiqueta. Mismo alfabeto que un nombre de app.
+    """
+    import re
+
+    host = (fqdn or "").strip().lower()
+    label = (host.replace(".", "-") if full else host.split(".")[0]).replace("_", "-")
+    label = re.sub(r"[^a-z0-9-]", "", label)
+    label = re.sub(r"-+", "-", label).strip("-")
+    return label or "site"
+
+
+def root_app_name(fqdn: str, *, full: bool = False, ordinal: int = 1) -> str:
+    """Nombre de la app raíz de un dominio: '<sitio>-homepage', dentro de 63 caracteres.
+
+    Antes toda app raíz se llamaba 'homepage' y el homepage del segundo dominio
+    chocaba con el del primero: el nombre es la identidad de repo, despliegue y
+    secretos. El número de desempate va antes del sufijo ('sibo-store-2-homepage')
+    para que todo homepage termine igual y su grupo se derive del nombre.
+    """
+    tail = f"-{ordinal}" if ordinal > 1 else ""
+    slug = site_slug(fqdn, full=full)[: 63 - len(ROOT_APP_SUFFIX) - len(tail)].rstrip("-")
+    return f"{slug}{tail}{ROOT_APP_SUFFIX}"
+
+
+def root_app_candidates(fqdn: str):
+    """Nombres a probar, en orden: 'sibo-homepage', 'sibo-store-homepage', 'sibo-store-2-homepage'…
+
+    'sibo.site' y 'sibo.store' comparten la primera etiqueta: el segundo homepage
+    recibe el dominio completo en vez de un número que no dice de quién es.
+    """
+    yield root_app_name(fqdn)
+    full = root_app_name(fqdn, full=True)
+    if full != root_app_name(fqdn):
+        yield full
+    ordinal = 2
+    while True:
+        yield root_app_name(fqdn, full=True, ordinal=ordinal)
+        ordinal += 1
+
+
+def site_group(root_name: str) -> str:
+    """Grupo lógico de un sitio: el nombre de su homepage sin el sufijo ('sibo-homepage' → 'sibo').
+
+    Derivarlo del nombre (único) y no solo del dominio evita que dos sitios con la
+    misma primera etiqueta compartan grupo y mezclen su API y su base.
+    """
+    name = (root_name or "").strip().lower()
+    if name.endswith(ROOT_APP_SUFFIX) and len(name) > len(ROOT_APP_SUFFIX):
+        return name[: -len(ROOT_APP_SUFFIX)]
+    return name
 
 
 def public_host(app_name: str, env: str, fqdn: str, *, is_root_domain: bool = False) -> str:

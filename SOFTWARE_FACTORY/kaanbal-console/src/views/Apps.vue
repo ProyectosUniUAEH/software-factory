@@ -180,7 +180,7 @@
     </div>
 
     <!-- Empty State -->
-    <div v-else-if="apps.length === 0 && !rootApp" class="text-center py-16 bg-gradient-to-b from-white/5 to-transparent rounded-2xl border border-white/10">
+    <div v-else-if="apps.length === 0" class="text-center py-16 bg-gradient-to-b from-white/5 to-transparent rounded-2xl border border-white/10">
       <div class="text-7xl mb-6 animate-bounce">🚀</div>
       <h3 class="text-2xl font-bold text-white mb-2">No apps deployed yet</h3>
       <p class="text-slate-400 mb-8 max-w-md mx-auto">Start your Kaanbal Engine by creating your first application.</p>
@@ -192,90 +192,193 @@
     <!-- Apps Grid -->
     <div v-else class="space-y-8">
 
-      <!-- ━━━ Root Domain Hero Card ━━━ -->
-      <div v-if="rootApp" class="relative overflow-hidden rounded-2xl border border-amber-500/30 bg-gradient-to-br from-amber-900/20 via-slate-900/80 to-purple-900/20 shadow-xl shadow-amber-500/10">
-        <!-- Decorative top bar -->
-        <div class="h-1.5 w-full bg-gradient-to-r from-amber-400 via-amber-500 to-orange-500"></div>
-        
-        <div class="p-6 flex flex-col lg:flex-row gap-6 items-start lg:items-center">
-          <!-- Left: Identity -->
-          <div class="flex items-center gap-4 flex-1 min-w-0">
-            <div class="relative shrink-0">
-              <div class="w-16 h-16 rounded-2xl bg-gradient-to-br from-amber-500/30 to-orange-500/30 flex items-center justify-center text-3xl border border-amber-500/30 shadow-lg shadow-amber-500/20">
-                🏠
-              </div>
-              <div :class="['absolute -bottom-1 -right-1 w-5 h-5 rounded-full border-2 border-slate-900 flex items-center justify-center text-xs', getStatusBadge(rootApp)]">
-                {{ getStatusIcon(rootApp) }}
-              </div>
-            </div>
-            <div class="min-w-0">
-              <div class="flex items-center gap-2 mb-0.5">
-                <span class="text-amber-400 text-sm">👑</span>
-                <span class="text-[10px] font-bold uppercase tracking-widest text-amber-400/80">Main Website</span>
-              </div>
-              <h2 class="text-2xl font-bold text-white truncate">{{ getPublicDomain() }}</h2>
-              <p class="text-xs text-slate-500 mt-0.5">Internal: <span class="text-slate-400 font-mono">{{ rootApp.name }}</span> · {{ rootApp.type }}</p>
-            </div>
+      <!-- ━━━ Sitios web: un sitio por dominio ━━━ -->
+      <!-- Cada dominio registrado es un sitio: su homepage ocupa la raíz y las apps
+           de su grupo (API, base de datos) lo acompañan. Antes solo el dominio de
+           instalación podía tener homepage. -->
+      <section v-if="sites.length" class="space-y-4">
+        <div class="flex items-end justify-between gap-3 flex-wrap">
+          <div>
+            <h2 class="text-lg font-bold text-white">Sitios web</h2>
+            <p class="text-xs text-slate-500">Un sitio por dominio: su homepage en la raíz y las apps que lo acompañan.</p>
           </div>
+          <router-link to="/domains" class="text-xs text-slate-400 hover:text-white transition-colors">Gestionar dominios →</router-link>
+        </div>
 
-          <!-- Center: Status Chips -->
-          <div class="flex flex-wrap gap-2">
-            <div class="px-3 py-1.5 rounded-lg bg-black/30 border border-white/5 text-center">
-              <p class="text-sm font-bold" :class="getHealthColor(rootApp.argocd)">{{ rootApp.argocd?.health?.status || '...' }}</p>
-              <p class="text-[9px] text-slate-600 uppercase">Health</p>
-            </div>
-            <div class="px-3 py-1.5 rounded-lg bg-black/30 border border-white/5 text-center">
-              <p class="text-sm font-bold" :class="rootApp.argocd?.isSynced ? 'text-emerald-400' : 'text-amber-400'">{{ rootApp.argocd?.isSynced ? 'Synced' : 'Pending' }}</p>
-              <p class="text-[9px] text-slate-600 uppercase">Sync</p>
-            </div>
-            <button
-              v-for="env in rootApp.environments"
-              :key="'root-' + env"
-              @click="openEnvironmentDetail(rootApp, env)"
-              :class="['px-3 py-1.5 rounded-lg text-xs font-medium transition-all border cursor-pointer', getEnvStyle(rootApp, env)]"
-            >
-              {{ getEnvIcon(env) }} {{ env }}
-              <span :class="['ml-1.5 w-2 h-2 rounded-full inline-block', getEnvDot(rootApp, env)]"></span>
-            </button>
-          </div>
+        <div
+          v-for="site in sites"
+          :key="site.key"
+          class="relative overflow-hidden rounded-2xl border transition-all"
+          :class="site.homepage
+            ? (site.domain.is_default
+                ? 'border-amber-500/30 bg-gradient-to-br from-amber-900/20 via-slate-900/80 to-purple-900/20 shadow-xl shadow-amber-500/10'
+                : 'border-purple-500/30 bg-gradient-to-br from-purple-900/25 via-slate-900/80 to-cyan-900/15 shadow-xl shadow-purple-500/10')
+            : 'border-dashed border-white/15 bg-white/[0.02]'"
+        >
+          <div
+            v-if="site.homepage"
+            class="h-1.5 w-full"
+            :class="site.domain.is_default ? 'bg-gradient-to-r from-amber-400 via-amber-500 to-orange-500' : 'bg-gradient-to-r from-purple-400 via-fuchsia-500 to-pink-500'"
+          ></div>
 
-          <!-- Right: Actions -->
-          <div class="flex items-center gap-2 shrink-0">
-            <a
-              :href="getAppUrl(rootApp)"
-              target="_blank"
-              class="px-6 py-3 bg-gradient-to-r from-amber-500 to-orange-500 hover:from-amber-400 hover:to-orange-400 text-white text-sm font-bold rounded-xl transition-all flex items-center gap-2 shadow-lg shadow-amber-500/30"
-            >
-              🌐 Open Site <span class="text-xs opacity-75">↗</span>
-            </a>
-            <button
-              @click="openEnvironments(rootApp)"
-              class="px-4 py-3 bg-white/5 hover:bg-white/10 text-slate-300 border border-white/10 rounded-xl transition-colors"
-              title="Environments"
-            >
-              🌍
-            </button>
-            <div class="relative">
-              <button @click="rootApp.showMenu = !rootApp.showMenu" class="p-3 hover:bg-white/5 rounded-xl transition-colors">
-                <span class="text-slate-400">⋮</span>
-              </button>
-              <Transition name="dropdown">
-                <div v-if="rootApp.showMenu" class="absolute right-0 top-12 w-48 bg-slate-800 border border-white/10 rounded-xl shadow-2xl z-20 overflow-hidden">
-                  <button @click="viewAppDetails(rootApp); rootApp.showMenu = false" class="w-full px-4 py-3 text-left text-sm hover:bg-white/5 flex items-center gap-3">
-                    <span>📊</span> View Details
-                  </button>
-                  <button @click="openEnvironments(rootApp); rootApp.showMenu = false" class="w-full px-4 py-3 text-left text-sm hover:bg-white/5 flex items-center gap-3">
-                    <span>🌍</span> Environments
-                  </button>
-                  <button @click="showConfirmDelete(rootApp); rootApp.showMenu = false" class="w-full px-4 py-3 text-left text-sm hover:bg-red-500/10 text-red-400 flex items-center gap-3 border-t border-white/5">
-                    <span>🗑️</span> Delete App
-                  </button>
+          <!-- Sitio con homepage -->
+          <template v-if="site.homepage">
+            <div class="p-6 flex flex-col lg:flex-row gap-6 items-start lg:items-center">
+              <div class="flex items-center gap-4 flex-1 min-w-0">
+                <div class="relative shrink-0">
+                  <div
+                    class="w-16 h-16 rounded-2xl flex items-center justify-center text-3xl border shadow-lg"
+                    :class="site.domain.is_default
+                      ? 'bg-gradient-to-br from-amber-500/30 to-orange-500/30 border-amber-500/30 shadow-amber-500/20'
+                      : 'bg-gradient-to-br from-purple-500/30 to-pink-500/30 border-purple-500/30 shadow-purple-500/20'"
+                  >🏠</div>
+                  <div :class="['absolute -bottom-1 -right-1 w-5 h-5 rounded-full border-2 border-slate-900 flex items-center justify-center text-xs', getStatusBadge(site.homepage)]">
+                    {{ getStatusIcon(site.homepage) }}
+                  </div>
                 </div>
-              </Transition>
+                <div class="min-w-0">
+                  <div class="flex items-center gap-2 mb-0.5">
+                    <span class="text-sm" :class="site.domain.is_default ? 'text-amber-400' : 'text-purple-300'">{{ site.domain.is_default ? '👑' : '🤝' }}</span>
+                    <span class="text-[10px] font-bold uppercase tracking-widest" :class="site.domain.is_default ? 'text-amber-400/80' : 'text-purple-300/80'">
+                      {{ site.domain.is_default ? 'Sitio principal · dominio de Kaanbal' : 'Sitio de cliente' }}
+                    </span>
+                  </div>
+                  <h3 class="text-2xl font-bold text-white truncate">{{ site.domain.fqdn }}</h3>
+                  <p class="text-xs text-slate-500 mt-0.5">
+                    Homepage: <span class="text-slate-400 font-mono">{{ site.homepage.name }}</span> · {{ site.homepage.type }}
+                  </p>
+                </div>
+              </div>
+
+              <div class="flex flex-wrap gap-2">
+                <div class="px-3 py-1.5 rounded-lg bg-black/30 border border-white/5 text-center">
+                  <p class="text-sm font-bold" :class="getHealthColor(site.homepage.argocd)">{{ site.homepage.argocd?.health?.status || '...' }}</p>
+                  <p class="text-[9px] text-slate-600 uppercase">Health</p>
+                </div>
+                <div class="px-3 py-1.5 rounded-lg bg-black/30 border border-white/5 text-center">
+                  <p class="text-sm font-bold" :class="site.homepage.argocd?.isSynced ? 'text-emerald-400' : 'text-amber-400'">{{ site.homepage.argocd?.isSynced ? 'Synced' : 'Pending' }}</p>
+                  <p class="text-[9px] text-slate-600 uppercase">Sync</p>
+                </div>
+                <button
+                  v-for="env in site.homepage.environments"
+                  :key="site.key + '-' + env"
+                  @click="openEnvironmentDetail(site.homepage, env)"
+                  :class="['px-3 py-1.5 rounded-lg text-xs font-medium transition-all border cursor-pointer', getEnvStyle(site.homepage, env)]"
+                >
+                  {{ getEnvIcon(env) }} {{ env }}
+                  <span :class="['ml-1.5 w-2 h-2 rounded-full inline-block', getEnvDot(site.homepage, env)]"></span>
+                </button>
+              </div>
+
+              <div class="flex items-center gap-2 shrink-0">
+                <a
+                  :href="getAppUrl(site.homepage)"
+                  target="_blank"
+                  rel="noopener"
+                  class="px-6 py-3 text-white text-sm font-bold rounded-xl transition-all flex items-center gap-2 shadow-lg"
+                  :class="site.domain.is_default
+                    ? 'bg-gradient-to-r from-amber-500 to-orange-500 hover:from-amber-400 hover:to-orange-400 shadow-amber-500/30'
+                    : 'bg-gradient-to-r from-purple-500 to-fuchsia-500 hover:from-purple-400 hover:to-fuchsia-400 shadow-purple-500/30'"
+                >
+                  🌐 Abrir sitio <span class="text-xs opacity-75">↗</span>
+                </a>
+                <div class="relative">
+                  <button @click="site.homepage.showMenu = !site.homepage.showMenu" class="p-3 hover:bg-white/5 rounded-xl transition-colors">
+                    <span class="text-slate-400">⋮</span>
+                  </button>
+                  <Transition name="dropdown">
+                    <div v-if="site.homepage.showMenu" class="absolute right-0 top-12 w-52 bg-slate-800 border border-white/10 rounded-xl shadow-2xl z-20 overflow-hidden">
+                      <button @click="viewAppDetails(site.homepage); site.homepage.showMenu = false" class="w-full px-4 py-3 text-left text-sm hover:bg-white/5 flex items-center gap-3">
+                        <span>📊</span> View Details
+                      </button>
+                      <button @click="openEnvironments(site.homepage); site.homepage.showMenu = false" class="w-full px-4 py-3 text-left text-sm hover:bg-white/5 flex items-center gap-3">
+                        <span>🌍</span> Environments
+                      </button>
+                      <button @click="openExposureManager(site.homepage); site.homepage.showMenu = false" class="w-full px-4 py-3 text-left text-sm hover:bg-white/5 flex items-center gap-3">
+                        <span>⚙</span> Manage exposure
+                      </button>
+                      <button @click="showConfirmDelete(site.homepage); site.homepage.showMenu = false" class="w-full px-4 py-3 text-left text-sm hover:bg-red-500/10 text-red-400 flex items-center gap-3 border-t border-white/5">
+                        <span>🗑️</span> Delete App
+                      </button>
+                    </div>
+                  </Transition>
+                </div>
+              </div>
             </div>
+
+            <!-- Stack del sitio: qué pieza es cada app y de qué dominio -->
+            <div class="px-6 pb-6">
+              <div class="rounded-xl border border-white/5 bg-black/20 p-4">
+                <p class="text-[10px] uppercase tracking-wider text-slate-500 mb-3">
+                  Stack del sitio · grupo <span class="font-mono normal-case text-cyan-300">{{ site.group || 'sin grupo' }}</span>
+                </p>
+                <div class="grid gap-3 xl:grid-cols-3">
+                  <div v-for="lane in siteLanes(site)" :key="lane.id" class="rounded-lg border border-white/5 bg-white/[0.02] p-3 min-w-0">
+                    <p class="text-[10px] font-semibold uppercase tracking-wider mb-2" :class="lane.color">{{ lane.icon }} {{ lane.label }}</p>
+                    <div class="space-y-1.5">
+                      <button
+                        v-for="member in lane.apps"
+                        :key="member.id"
+                        @click="viewAppDetails(member)"
+                        class="w-full flex items-center gap-2 text-left text-xs rounded-md px-2 py-1.5 hover:bg-white/5 min-w-0"
+                        :title="member.domain?.public ? getAppUrl(member) : 'Privada · ' + privateLabel(member)"
+                      >
+                        <span :class="['w-2 h-2 rounded-full shrink-0', getEnvDot(member, primaryEnv(member))]"></span>
+                        <span class="font-mono text-slate-200 truncate">{{ member.name }}</span>
+                        <span v-if="lane.id === 'frontend'" class="ml-auto shrink-0 text-[9px] px-1.5 py-0.5 rounded bg-amber-500/15 text-amber-300 border border-amber-500/25">raíz</span>
+                        <span v-else-if="!member.domain?.public" class="ml-auto shrink-0 text-[9px] text-slate-500">🔒 {{ privateLabel(member) }}</span>
+                      </button>
+                      <p v-if="!lane.apps.length" class="text-[11px] text-slate-600 px-2 py-1">Sin {{ lane.addLabel }} todavía.</p>
+                    </div>
+                    <div v-if="lane.category" class="mt-2 pt-2 border-t border-white/5 flex items-center gap-2 flex-wrap">
+                      <button
+                        @click="addToSite(site, lane.category)"
+                        class="text-[11px] px-2 py-1 rounded-md border border-dashed border-white/15 text-slate-400 hover:text-white hover:border-white/30 transition-colors"
+                      >+ Nueva {{ lane.addLabel }}</button>
+                      <select
+                        v-if="linkCandidates(site, lane.id).length"
+                        @change="linkToSite(site, $event.target.value); $event.target.value = ''"
+                        class="min-w-0 flex-1 bg-slate-900/80 border border-white/10 rounded-md px-2 py-1 text-[11px] text-slate-300"
+                        :title="'Sumar una ' + lane.addLabel + ' que ya existe a este sitio'"
+                      >
+                        <option value="">Vincular existente…</option>
+                        <option v-for="candidate in linkCandidates(site, lane.id)" :key="candidate.id" :value="candidate.name">
+                          {{ candidate.name }}{{ candidate.app_group ? ` (grupo ${candidate.app_group})` : '' }}
+                        </option>
+                      </select>
+                    </div>
+                  </div>
+                </div>
+                <p v-if="site.others.length" class="mt-3 text-[11px] text-slate-500">
+                  También en el sitio:
+                  <span v-for="(member, i) in site.others" :key="member.id" class="font-mono text-slate-400">{{ member.name }}<span v-if="i < site.others.length - 1">, </span></span>
+                </p>
+              </div>
+            </div>
+          </template>
+
+          <!-- Dominio sin homepage -->
+          <div v-else class="p-5 flex items-center justify-between gap-4 flex-wrap">
+            <div class="flex items-center gap-3 min-w-0">
+              <span class="text-2xl opacity-60">🌐</span>
+              <div class="min-w-0">
+                <p class="text-base font-semibold text-slate-200 truncate">{{ site.domain.fqdn }}</p>
+                <p class="text-xs text-slate-500">
+                  Todavía no tiene homepage.
+                  <span v-if="site.homepageName">Se creará como <span class="font-mono text-slate-400">{{ site.homepageName }}</span>, en el grupo <span class="font-mono text-slate-400">{{ site.plannedGroup }}</span>.</span>
+                </p>
+              </div>
+            </div>
+            <button
+              @click="createHomepage(site)"
+              class="px-4 py-2 rounded-xl text-sm font-semibold border transition-colors"
+              :class="site.domain.is_default
+                ? 'border-amber-500/40 text-amber-200 bg-amber-500/10 hover:bg-amber-500/20'
+                : 'border-purple-500/40 text-purple-200 bg-purple-500/10 hover:bg-purple-500/20'"
+            >+ Crear homepage</button>
           </div>
         </div>
-      </div>
+      </section>
 
       <!-- Organización: por grupo lógico o por dominio público -->
       <div v-if="regularApps.length > 0" class="flex items-center justify-between gap-3 flex-wrap">
@@ -302,6 +405,9 @@
               <span class="text-sm font-semibold text-white truncate">{{ group.label }}</span>
               <span class="text-[10px] px-2 py-0.5 rounded bg-cyan-500/15 text-cyan-300 border border-cyan-500/30 shrink-0">{{ group.apps.length }} apps</span>
               <span v-if="group.isDefaultDomain" class="text-[10px] px-2 py-0.5 rounded bg-blue-500/15 text-blue-300 border border-blue-500/30 shrink-0">default · Kaanbal</span>
+              <span v-if="group.kind === 'group' && siteByGroup.get(group.label.toLowerCase())" class="text-[10px] px-2 py-0.5 rounded bg-purple-500/15 text-purple-200 border border-purple-500/30 shrink-0 truncate">
+                🏠 sitio {{ siteByGroup.get(group.label.toLowerCase()).domain.fqdn }}
+              </span>
             </button>
             <span v-if="group.kind === 'domain' && group.fqdn" class="text-[10px] uppercase tracking-wider text-slate-500">Dominio</span>
             <span v-else-if="group.kind === 'private'" class="text-[10px] uppercase tracking-wider text-slate-500">Sin dominio público</span>
@@ -336,7 +442,9 @@
                   <p class="text-xs text-slate-500 font-medium uppercase tracking-wider">
                     {{ app.type }}<span v-if="app.is_root_domain" class="ml-1.5 normal-case text-amber-300">· raíz del dominio</span>
                   </p>
-                  <p v-if="app.app_group" class="text-[10px] text-cyan-300 mt-1">Group: {{ app.app_group }}</p>
+                  <p v-if="app.app_group" class="text-[10px] text-cyan-300 mt-1">
+                    Group: {{ app.app_group }}<span v-if="siteOfApp(app)" class="text-purple-300"> · 🏠 sitio {{ siteOfApp(app).domain.fqdn }}</span>
+                  </p>
                 </div>
               </div>
               
@@ -1374,8 +1482,10 @@
 
 <script setup>
 import { ref, reactive, watch, computed, onMounted, onUnmounted } from 'vue'
+import { useRouter } from 'vue-router'
 import axios from 'axios'
 import { getConfig } from '../config'
+import { HOMEPAGE_SUFFIX, allocateHomepageName, siteGroup, siteSlug } from '../services/sites'
 import ExposureManagerModal from '../components/ExposureManagerModal.vue'
 
 // State
@@ -1469,15 +1579,147 @@ const getGitNamespace = () => getConfig('gitNamespace', '')
 const CORE_APP_NAMES = new Set(['datastore'])
 const groupCollapseState = ref({})
 
-// La tarjeta destacada es la app raíz del dominio de Kaanbal. Con varios dominios
-// cada uno puede tener su propia raíz (el sitio de un cliente): esas se muestran
-// como tarjetas normales. Antes solo existía una y las demás desaparecían.
-const rootApp = computed(() =>
-  apps.value.find(a => a.is_root_domain && (a.domain ? a.domain.is_default : true))
-)
+// ── Sitios web: un sitio por dominio ─────────────────────────────────────
+// Cada dominio registrado puede tener su homepage en la raíz ('<sitio>-homepage').
+// El sitio reúne además las apps de su grupo, para que se vea qué pieza es el
+// frontend raíz, cuál la API y cuál la base, y de qué dominio es cada una.
+// Antes solo el dominio de instalación tenía tarjeta y el resto se perdía.
+const router = useRouter()
+
+// Papel de una app dentro de un sitio. Las apps anteriores a guardar la categoría
+// se clasifican por su template, igual que el ícono de su tarjeta.
+const appRole = (app) => {
+  const category = (app.category || '').toLowerCase()
+  if (['frontend', 'backend', 'database'].includes(category)) return category
+  const tpl = (app.template_id || '').toLowerCase()
+  if (tpl.includes('api')) return 'backend'
+  if (/(postgres|mysql|mongo|redis|db)/.test(tpl)) return 'database'
+  if (/(vue|react|angular|next|spa)/.test(tpl)) return 'frontend'
+  return 'other'
+}
+
+const sameGroup = (a, b) => !!a && !!b && a.toLowerCase() === b.toLowerCase()
+
+const sites = computed(() => {
+  // Sin la lista de dominios (API sin actualizar o error) queda el de Kaanbal.
+  const domains = availableDomains.value.length
+    ? availableDomains.value
+    : [{ _id: null, fqdn: getPublicDomain(), is_default: true }]
+  const defaultId = domains.find(d => d.is_default)?._id || null
+  const domainOf = (app) => app.domain?.id || app.domain_id || defaultId
+  const roots = apps.value.filter(a => a.is_root_domain)
+  const takenNames = apps.value.map(a => a.name)
+
+  return domains
+    .map(domain => {
+      const homepage = roots.find(a => domainOf(a) === (domain._id || null)) || null
+      const group = homepage?.app_group || null
+      const members = group
+        ? apps.value
+            .filter(a => a.id !== homepage.id && sameGroup(a.app_group, group))
+            .sort((a, b) => a.name.localeCompare(b.name))
+        : []
+      // Lo que asignará la API al crear el homepage (ver services/sites.js).
+      const homepageName = allocateHomepageName(domain.fqdn, takenNames)
+      return {
+        key: domain._id || `fqdn:${domain.fqdn}`,
+        domain,
+        homepage,
+        group,
+        homepageName,
+        plannedGroup: siteGroup(homepageName),
+        members,
+        others: members.filter(a => !['backend', 'database'].includes(appRole(a))),
+      }
+    })
+    // El sitio de Kaanbal primero, después los que ya tienen homepage.
+    .sort((a, b) => {
+      if (!!a.domain.is_default !== !!b.domain.is_default) return a.domain.is_default ? -1 : 1
+      if (!!a.homepage !== !!b.homepage) return a.homepage ? -1 : 1
+      return a.domain.fqdn.localeCompare(b.domain.fqdn)
+    })
+})
+
+// Los homepages viven en su sitio; el resto de apps (incluidas API y base de un
+// sitio) sigue en la grilla, donde se gestionan igual que siempre.
+const featuredIds = computed(() => new Set(sites.value.filter(s => s.homepage).map(s => s.homepage.id)))
+
+// Para marcar en la grilla qué grupo (y qué app) forma parte de un sitio.
+const siteByGroup = computed(() => {
+  const map = new Map()
+  sites.value.forEach(s => { if (s.homepage && s.group) map.set(s.group.toLowerCase(), s) })
+  return map
+})
+const siteOfApp = (app) => (app.app_group && siteByGroup.value.get(app.app_group.toLowerCase())) || null
+
+const SITE_LANES = [
+  { id: 'frontend', label: 'Frontend raíz', icon: '🖥️', color: 'text-amber-300' },
+  { id: 'backend', label: 'API', icon: '⚡', color: 'text-cyan-300', category: 'backend', addLabel: 'API' },
+  { id: 'database', label: 'Base de datos', icon: '🗄️', color: 'text-emerald-300', category: 'database', addLabel: 'base de datos' },
+]
+
+// Estado de una pieza del sitio: prod si lo tiene, si no su primer ambiente.
+const primaryEnv = (app) => {
+  const envs = app.environments || ['prod']
+  return envs.includes('prod') ? 'prod' : envs[0]
+}
+
+const siteLanes = (site) => SITE_LANES.map(lane => ({
+  ...lane,
+  apps: lane.id === 'frontend'
+    ? [site.homepage]
+    : site.members.filter(a => appRole(a) === lane.id),
+}))
+
+// Apps existentes que pueden sumarse a un sitio: mismo papel, fuera del sitio y
+// sin pertenecer a otro (moverlas desarmaría ese sitio sin que se note aquí).
+const linkCandidates = (site, role) => apps.value
+  .filter(a => !a.is_root_domain && appRole(a) === role)
+  .filter(a => !sameGroup(a.app_group, site.group) && !siteOfApp(a))
+  .sort((a, b) => a.name.localeCompare(b.name))
+
+// Un homepage sin grupo (creado antes de que existieran los sitios) recibe uno
+// al sumarle su primera pieza; sin eso la pieza nueva no aparecería en el sitio.
+// Nunca el grupo de otro sitio: mezclaría la API y la base de los dos.
+const ensureSiteGroup = async (site) => {
+  if (site.group) return site.group
+  const used = new Set(sites.value.map(s => (s.group || '').toLowerCase()).filter(Boolean))
+  const preferred = site.homepage.name.endsWith(HOMEPAGE_SUFFIX)
+    ? siteGroup(site.homepage.name)
+    : siteSlug(site.domain.fqdn)
+  const group = used.has(preferred) ? siteSlug(site.domain.fqdn, { full: true }) : preferred
+  await updateAppGroup(site.homepage, group)
+  return group
+}
+
+const addToSite = async (site, category) => {
+  try {
+    const group = await ensureSiteGroup(site)
+    router.push({ path: '/wizard', query: { domain_id: site.domain._id || undefined, group, category } })
+  } catch (e) {
+    showToast('error', 'Sitio', 'No se pudo preparar el grupo del sitio')
+  }
+}
+
+const linkToSite = async (site, appName) => {
+  const app = apps.value.find(a => a.name === appName)
+  if (!app) return
+  try {
+    const group = await ensureSiteGroup(site)
+    await updateAppGroup(app, group)
+    showToast('success', 'Sitio actualizado', `${app.name} ahora es parte de ${site.domain.fqdn}`)
+  } catch (e) {
+    showToast('error', 'Sitio', `No se pudo sumar ${app.name} al sitio`)
+  }
+}
+
+const createHomepage = (site) => {
+  router.push({ path: '/wizard', query: site.domain._id ? { site: site.domain._id } : { site: 'default' } })
+}
+
 const regularApps = computed(() => {
   return apps.value
-    .filter(a => a.id !== rootApp.value?.id)
+    .filter(a => !featuredIds.value.has(a.id))
     .sort((a, b) => a.name.localeCompare(b.name))
 })
 

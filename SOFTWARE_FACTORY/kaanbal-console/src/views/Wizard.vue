@@ -157,7 +157,7 @@
                     <p class="text-xs text-slate-500 mt-1">Lowercase, hyphens only.</p>
                     <label v-if="supportsRootDomain" class="mt-2 flex items-center gap-2 text-xs text-slate-300 cursor-pointer">
                       <input type="checkbox" v-model="useRootDomain" class="w-4 h-4 rounded bg-slate-700 border-slate-600" />
-                      <span>Use root domain in prod (<code>https://{{ rootDomainHost }}</code>) and assign internal name <code>homepage</code> automatically.</span>
+                      <span>Homepage del dominio: prod queda en <code>https://{{ rootDomainHost }}</code> con el nombre interno <code>{{ rootNamePreview }}</code>.</span>
                     </label>
                     <p v-if="supportsRootDomain && useRootDomain" class="mt-1 text-[11px] text-amber-300/90">
                       Kaanbal tomará la raíz de <span class="font-mono">{{ rootDomainHost }}</span>: si hoy apunta a otro
@@ -702,9 +702,10 @@
 </template>
 
 <script setup>
-import { ref, reactive, computed, onMounted, watch } from 'vue'
+import { ref, reactive, computed, onMounted, watch, nextTick } from 'vue'
 import axios from 'axios'
 import { getConfig } from '@/config'
+import { allocateHomepageName, siteGroup } from '@/services/sites'
 import { useRouter, useRoute } from 'vue-router'
 
 const router = useRouter()
@@ -1009,6 +1010,8 @@ const hasPublicExposure = computed(() => {
 const previewPublicHost = computed(() => {
     const domain = availableDomains.value.find(d => d._id === form.domain_id)
     const fqdn = domain?.fqdn || 'dominio'
+    // El homepage ocupa la raíz: su prod no lleva el nombre de la app delante.
+    if (useRootDomain.value) return fqdn
     return form.name ? `${form.name}.${fqdn}` : `<app>.${fqdn}`
 })
 
@@ -1058,6 +1061,13 @@ const rootDomainHost = computed(() => {
   if (configured) return configured
   return window.location.hostname.replace(/^kaanbal-console\./, '')
 })
+
+// Mismo nombre que asigna la API (domain_service.root_app_candidates): '<sitio>-homepage',
+// o 'sibo-store-homepage' si otro dominio ya tomó 'sibo-homepage'. Antes el Wizard
+// mandaba siempre 'homepage' y el homepage de un segundo dominio chocaba con el del primero.
+const rootNamePreview = computed(() =>
+  allocateHomepageName(rootDomainHost.value, existingApps.value.map(app => app.name))
+)
 
 // Una app raíz por dominio: cada cliente puede tener su propio sitio en la raíz
 // de su dominio. Antes el límite era uno por instalación.
@@ -1330,11 +1340,21 @@ watch(() => form.template, (newVal) => {
 
   watch(useRootDomain, (enabled) => {
     if (!enabled) return
-    // Internal unique suffix (if needed) is allocated server-side.
-    form.name = 'homepage'
+    // El nombre sale del dominio; si hiciera falta desempatar, la API agrega '-N'.
+    form.name = rootNamePreview.value
+    // El homepage abre un sitio: sin grupo, recibe el del sitio ('sibo-homepage' → 'sibo').
+    if (!form.app_group) form.app_group = siteGroup(rootNamePreview.value)
     // Root-domain apps MUST have prod exposed as public (it IS the root domain).
     if (!form.exposure.per_env) form.exposure.per_env = {}
     form.exposure.per_env.prod = 'public'
+  })
+
+  // Cambiar de dominio con la raíz elegida cambia el sitio: nombre y grupo lo siguen.
+  watch(rootNamePreview, (name, previous) => {
+    if (!useRootDomain.value) return
+    const previousGroup = siteGroup(previous)
+    form.name = name
+    if (!form.app_group || form.app_group === previousGroup) form.app_group = siteGroup(name)
   })
 
 // Watch environments to auto-populate per_env for new envs
@@ -1369,7 +1389,7 @@ watch(databaseBindingsEnabled, (enabled) => {
 })
 
 onMounted(async () => {
-    loadDomains()
+    const domainsLoaded = loadDomains()
 
     // Load templates from API
     try {
@@ -1392,6 +1412,44 @@ onMounted(async () => {
     // Check for pre-selected template from query
     if (route.query.template) {
         form.template = route.query.template
+    }
+
+    // Llegadas desde "Sitios web": el Wizard viene preconfigurado para el sitio.
+    //   ?site=<domain_id>                       → homepage (raíz) de ese dominio
+    //   ?domain_id=&group=&category=backend|database → API o base del sitio
+    const DEFAULT_TEMPLATE_BY_CATEGORY = { frontend: 'vue3-spa', backend: 'fastapi-api', database: 'postgres' }
+    // El nombre y la raíz del homepage salen del dominio elegido: hace falta la lista.
+    await domainsLoaded
+    // 'default' = el dominio de Kaanbal cuando la célula aún no lista dominios.
+    const presetDomain = route.query.site || route.query.domain_id
+    if (presetDomain && presetDomain !== 'default') form.domain_id = String(presetDomain)
+    if (route.query.group) form.app_group = String(route.query.group)
+    const presetCategory = route.query.site ? 'frontend' : route.query.category
+    if (!form.template && presetCategory && DEFAULT_TEMPLATE_BY_CATEGORY[presetCategory]) {
+        const wanted = templates.value.find(t => t.id === DEFAULT_TEMPLATE_BY_CATEGORY[presetCategory])
+        if (wanted) {
+            form.template = wanted.id
+            // Las bases son imágenes oficiales (Config Only); el resto se genera del template.
+            const modes = wanted.creation_modes || ['scaffold']
+            form.creation_mode = modes.includes('scaffold') ? 'scaffold' : modes[0]
+            // El sitio ya decidió qué crear: directo a la configuración.
+            step.value = 2
+        }
+    }
+    // API y base de un sitio se llaman como él ('rincon-del-mar-api'): así se sabe
+    // de quién son también en GitHub, ArgoCD y Vault. Es solo una sugerencia editable.
+    const SITE_PIECE_SUFFIX = { backend: 'api', database: 'db' }
+    if (!route.query.site && route.query.group && SITE_PIECE_SUFFIX[presetCategory] && !form.name) {
+        const taken = new Set(existingApps.value.map(app => String(app.name).toLowerCase()))
+        const base = `${String(route.query.group).slice(0, 56)}-${SITE_PIECE_SUFFIX[presetCategory]}`
+        let candidate = base
+        for (let n = 2; taken.has(candidate); n++) candidate = `${base}-${n}`
+        form.name = candidate
+    }
+    if (route.query.site) {
+        // La casilla de raíz depende de que el template ya sea frontend.
+        await nextTick()
+        if (supportsRootDomain.value) useRootDomain.value = true
     }
     
     // Check credentials status

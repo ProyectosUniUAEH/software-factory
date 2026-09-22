@@ -137,14 +137,16 @@ def _derive_claims_from_existing_app(app_doc: dict, domain: str) -> list[str]:
     return list(dict.fromkeys(claims))
 
 
-async def _allocate_root_app_name(db) -> str:
-    base_name = "homepage"
-    candidate = base_name
-    suffix = 2
-    while await db.apps.find_one({"name": {"$regex": f"^{re.escape(candidate)}$", "$options": "i"}}):
-        candidate = f"{base_name}-{suffix}"
-        suffix += 1
-    return candidate
+# El Wizard históricamente mandaba este nombre fijo para toda app raíz; se trata
+# como "sin nombre" para que cada dominio reciba el suyo.
+LEGACY_ROOT_NAME = "homepage"
+
+
+async def _allocate_root_app_name(db, fqdn: str) -> str:
+    """Primer nombre libre para la app raíz de un dominio (ver domain_service.root_app_candidates)."""
+    for candidate in domain_service.root_app_candidates(fqdn):
+        if not await db.apps.find_one({"name": {"$regex": f"^{re.escape(candidate)}$", "$options": "i"}}):
+            return candidate
 
 
 @router.get("", response_model=List[dict])
@@ -351,9 +353,11 @@ async def create_app(
     use_root_domain = _is_root_domain_requested(app_data)
     normalized_name = _normalize_app_name(app_data.name)
 
-    # Root-domain apps can omit name in the UI; backend allocates a deterministic internal slug.
-    if use_root_domain and not normalized_name:
-        normalized_name = await _allocate_root_app_name(db)
+    # Una app raíz se nombra por su dominio ('<sitio>-homepage'). "homepage" a
+    # secas es lo que el Wizard mandaba siempre: se trata como sin nombre, o el
+    # homepage de un segundo dominio chocaría con el del primero.
+    if use_root_domain and normalized_name in ("", LEGACY_ROOT_NAME):
+        normalized_name = await _allocate_root_app_name(db, domain)
 
     if not _is_valid_app_name(normalized_name):
         raise HTTPException(
@@ -430,6 +434,10 @@ async def create_app(
 
     # Crear registro en DB
     app_group = _normalize_app_group(getattr(app_data, "app_group", None))
+    # El homepage abre un sitio: si no trae grupo, recibe el del sitio para que
+    # su API y su base se agrupen con él.
+    if use_root_domain and not app_group:
+        app_group = _normalize_app_group(domain_service.site_group(app_data.name))
 
     app_doc = {
         "name": app_data.name,

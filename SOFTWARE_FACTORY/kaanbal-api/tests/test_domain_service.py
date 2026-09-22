@@ -353,6 +353,49 @@ class AppDomainDescriptionTests(unittest.TestCase):
         self.assertEqual(ds.claims_for(app, "a.com"), ["web.a.com"])
 
 
+class SiteNamingTests(unittest.TestCase):
+    """Un homepage por dominio: el nombre dice de qué dominio es."""
+
+    def test_homepages_of_different_domains_never_collide(self):
+        """El bloqueo real: todas se llamaban 'homepage' y la segunda chocaba."""
+        names = {ds.root_app_name(d) for d in (
+            "softwarefactory.site", "uaeh-genomicaygenetica.site", "rincon-del-mar.store",
+        )}
+        self.assertEqual(names, {
+            "softwarefactory-homepage", "uaeh-genomicaygenetica-homepage", "rincon-del-mar-homepage",
+        })
+
+    def test_site_slug_uses_the_recognizable_part_of_the_domain(self):
+        self.assertEqual(ds.site_slug("uaeh-genomicaygenetica.site"), "uaeh-genomicaygenetica")
+        self.assertEqual(ds.site_slug("Dev_Julian.Space"), "dev-julian")
+
+    def test_name_fits_kubernetes_limits_even_for_long_domains(self):
+        """63 caracteres también con el dominio completo y un número de desempate."""
+        fqdn = "un-dominio-extremadamente-largo-para-un-cliente-muy-especial.com"
+        for name in (ds.root_app_name(fqdn), ds.root_app_name(fqdn, full=True, ordinal=12)):
+            self.assertLessEqual(len(name), 63)
+            self.assertTrue(name.endswith("-homepage"))
+            self.assertRegex(name, r"^[a-z0-9]([-a-z0-9]*[a-z0-9])?$")
+
+    def test_domains_sharing_first_label_get_readable_names(self):
+        """sibo.site y sibo.store: el segundo dice de qué dominio es, no '-2'."""
+        candidates = ds.root_app_candidates("sibo.store")
+        self.assertEqual(
+            [next(candidates) for _ in range(3)],
+            ["sibo-homepage", "sibo-store-homepage", "sibo-store-2-homepage"],
+        )
+
+    def test_single_label_domain_does_not_repeat_candidates(self):
+        candidates = ds.root_app_candidates("localhost")
+        self.assertEqual([next(candidates) for _ in range(2)], ["localhost-homepage", "localhost-2-homepage"])
+
+    def test_site_group_is_the_homepage_name_without_suffix(self):
+        """Dos sitios nunca comparten grupo: el grupo sale del nombre único."""
+        self.assertEqual(ds.site_group("sibo-homepage"), "sibo")
+        self.assertEqual(ds.site_group("sibo-store-homepage"), "sibo-store")
+        self.assertEqual(ds.site_group("landing"), "landing")
+
+
 class StaleImportTests(unittest.TestCase):
     """dev-julian.space: el dominio venía de otra cuenta de Cloudflare y el escaneo
     importó las IPs del proxy de esa cuenta como si fueran el origen."""

@@ -14,6 +14,7 @@
 # Uso:
 #   sudo KAANBAL_ORG=<org> bash core-upgrade.sh --ref main
 #   sudo KAANBAL_ORG=<org> bash core-upgrade.sh --phase build
+#   sudo KAANBAL_ORG=<org> bash core-upgrade.sh --ref main --adopt-upstream   # descarta deriva, con registro
 #   sudo bash core-upgrade.sh --snapshot
 #   sudo KAANBAL_ORG=<org> bash core-upgrade.sh --rollback <api_tag> <console_tag>
 set -euo pipefail
@@ -41,6 +42,7 @@ while (($#)); do
     --source) shift; SOURCE_DIR="${1:?--source necesita una ruta}" ;;
     --phase) shift; PHASE="${1:?--phase necesita sync|build|promote|verify|all}" ;;
     --snapshot) PHASE=snapshot ;;
+    --adopt-upstream) ADOPT_UPSTREAM=1; export ADOPT_UPSTREAM ;;
     --rollback) PHASE=rollback; ROLLBACK_API="${2:-}"; ROLLBACK_CONSOLE="${3:-}"; shift 2 || true ;;
     *) echo "Argumento desconocido: $1" >&2; exit 2 ;;
   esac
@@ -368,9 +370,18 @@ if not found_ours:
     print("?  ningún commit del instalador en los últimos 100: historia desconocida")
 ') || die "No se pudo consultar la historia de $ORG/$c"
     if [[ -n "$foreign" ]]; then
-      die "$ORG/$c tiene cambios hechos fuera de Kaanbal:
+      if [[ "${ADOPT_UPSTREAM:-0}" == 1 ]]; then
+        # ADR-002 "adoptar upstream": decisión explícita de descartar lo local.
+        # Queda escrito en el log qué se descartó; el historial del repo lo
+        # conserva, así que se puede recuperar si hiciera falta.
+        warn "$ORG/$c: se adopta el monorepo y se descartan estos commits (siguen en el historial de git):"
+        printf '%s\n' "$foreign" | sed 's/^/       /' >&2
+      else
+        die "$ORG/$c tiene cambios hechos fuera de Kaanbal:
 $(printf '%s\n' "$foreign" | sed 's/^/       /')
-     Resuelve la deriva antes de sobrescribirlo (ver ADR-002)."
+     Resuelve la deriva antes de sobrescribirlo (ver ADR-002), o vuelve a
+     ejecutar con --adopt-upstream si esos cambios ya están en el monorepo."
+      fi
     fi
   done
 

@@ -12,6 +12,7 @@ Replica la lógica de tu flujo de n8n para crear apps:
 Soporta múltiples ambientes: dev, staging, prod
 """
 
+import asyncio
 import os
 import re
 import shutil
@@ -3174,6 +3175,31 @@ spec:
                 comp[k.replace("PASS", "PASSWORD").replace("USERNAME", "USER")] = sec[k]
         return comp
 
+    async def _read_app_secrets(self, app_name: str, env: str) -> dict:
+        """Credenciales de una app: Vault primero, el Secret del clúster como respaldo.
+
+        Vault se sella en cada reinicio del nodo. Si un backend se vincula a su base
+        mientras está sellado —o si la base se desplegó con Vault sellado y aún no se
+        reconcilió—, leer solo Vault le daría credenciales vacías y no conectaría. El
+        Secret de Kubernetes tiene los mismos datos: ambos salen de lo que Kaanbal
+        generó al desplegar la base.
+        """
+        secrets = await self._read_vault_secrets(app_name, env)
+        if secrets:
+            return secrets
+        try:
+            import base64
+            from app.services import vault_sync
+
+            by_ns = await asyncio.to_thread(vault_sync._list_secrets_by_namespace, [env])
+            secret = vault_sync.app_secret_from(by_ns.get(env, []), app_name)
+            if secret is not None and secret.data:
+                logger.info(f"Credenciales de {env}/{app_name} leídas del Secret del clúster (Vault sin la ruta)")
+                return {k: base64.b64decode(v).decode() for k, v in secret.data.items()}
+        except Exception as e:
+            logger.info(f"Respaldo desde el clúster falló para {env}/{app_name}: {e}")
+        return {}
+
     async def _read_vault_secrets(self, app_name: str, env: str) -> dict:
         """Read KV v2 secret data from Vault. Returns {} on any failure."""
         if not self._credentials:
@@ -3256,7 +3282,13 @@ spec:
                         await emit("db_bindings", f"Unknown DB template for {db_app}/{db_env}, skipped", "warning")
                     continue
 
-                secrets = await self._read_vault_secrets(db_app, db_env)
+                secrets = await self._read_app_secrets(db_app, db_env)
+                if not secrets and emit:
+                    await emit(
+                        "db_bindings",
+                        f"No se encontraron credenciales de {db_app}/{db_env} ni en Vault ni en el clúster",
+                        "warning",
+                    )
                 conn = self._build_db_connection_string(
                     template_id=template_id,
                     host=host,
@@ -3331,6 +3363,18 @@ spec:
                             keys = ", ".join(secrets_data.keys())
                             await emit("vault", f"Vault ({env}): {keys} written", "success")
                         wrote_any = True
+                    elif resp.status_code == 503 and "sealed" in resp.text.lower():
+                        # Vault se sella en cada reinicio del nodo. La app sigue
+                        # desplegándose (su Secret de Kubernetes sí se crea) y
+                        # vault_sync copia los secretos a Vault cuando se desbloquee.
+                        logger.warning(f"Vault sealed: secret/{env}/{app_name} pending until unseal")
+                        if emit:
+                            await emit(
+                                "vault",
+                                f"Vault ({env}) está sellado: la app se despliega igual y sus secretos "
+                                "se guardarán en Vault automáticamente cuando se desbloquee.",
+                                "warning",
+                            )
                     else:
                         logger.warning(f"Vault write failed for {env}/{app_name}: HTTP {resp.status_code} - {resp.text}")
                         if emit:

@@ -44,6 +44,8 @@ else
 fi
 
 systemctl disable --now "$SERVICE" 2>/dev/null || true
+systemctl disable --now kaanbal-vault-unseal.timer 2>/dev/null || true
+rm -f /etc/systemd/system/kaanbal-vault-unseal.service /etc/systemd/system/kaanbal-vault-unseal.timer
 fuser -k 3000/tcp 4600/tcp 8080/tcp 2>/dev/null || true
 pkill -f '/installer/server.py' 2>/dev/null || true
 pkill -f 'python3 installer/server.py' 2>/dev/null || true

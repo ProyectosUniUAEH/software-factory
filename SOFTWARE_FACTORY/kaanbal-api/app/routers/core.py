@@ -13,7 +13,7 @@ from typing import Optional
 from fastapi import APIRouter, Depends, HTTPException
 
 from app.routers.auth import get_current_active_user
-from app.services import core_release, core_upgrade
+from app.services import core_release, core_upgrade, vault_sync
 from app.services.activity_log import activity_log, CATEGORY_SYSTEM
 
 logger = logging.getLogger(__name__)
@@ -72,6 +72,28 @@ async def start_core_upgrade(body: Optional[dict] = None, current_user=Depends(g
         "core.upgrade.started", category=CATEGORY_SYSTEM,
         actor=current_user.username, target=result["name"], detail={"ref": ref},
     )
+    return result
+
+
+@router.get("/vault")
+async def get_vault_status():
+    """Estado de Vault y apps cuyos secretos no llegaron a Vault."""
+    return vault_sync.public_view(await vault_sync.missing())
+
+
+@router.post("/vault/reconcile")
+async def reconcile_vault(current_user=Depends(get_current_active_user)):
+    """Restaura en Vault los secretos que faltan. No sobrescribe rutas existentes.
+
+    La API no puede desbloquear Vault (la llave vive solo en el nodo); si está
+    sellado lo dice en vez de fallar a medias.
+    """
+    result = await vault_sync.reconcile()
+    if result.get("written"):
+        await activity_log.log(
+            "core.vault.reconciled", category=CATEGORY_SYSTEM, actor=current_user.username,
+            target="vault", detail={"written": result["written"]},
+        )
     return result
 
 

@@ -263,6 +263,41 @@ EOF
 
 systemctl daemon-reload
 systemctl enable --now "$SERVICE"
+
+# Vault se sella en cada reinicio del nodo. Sin esto, tras un reinicio los
+# despliegues no pueden guardar secretos y nadie se entera hasta que un backend
+# no conecta a su base. El timer lo desbloquea con la llave que ya vive en este
+# disco (/etc/kaanbal/vault-recovery.json); no hace nada si Vault está abierto.
+cat >/etc/systemd/system/kaanbal-vault-unseal.service <<EOF
+[Unit]
+Description=Kaanbal: desbloquear Vault si quedó sellado tras un reinicio
+After=k3s.service
+ConditionPathExists=/etc/kaanbal/vault-recovery.json
+
+[Service]
+Type=oneshot
+User=root
+Group=root
+WorkingDirectory=${SOURCE_DIR}
+ExecStart=/usr/bin/python3 ${SOURCE_DIR}/installer/vault_bootstrap.py --auto
+UMask=0077
+EOF
+
+cat >/etc/systemd/system/kaanbal-vault-unseal.timer <<EOF
+[Unit]
+Description=Kaanbal: revisar si Vault quedó sellado
+
+[Timer]
+OnBootSec=90s
+OnUnitActiveSec=2min
+
+[Install]
+WantedBy=timers.target
+EOF
+
+systemctl daemon-reload
+systemctl enable --now kaanbal-vault-unseal.timer
+
 PROBE_HOST="$INSTALLER_HOST"
 # A wildcard bind is reachable through loopback; a LAN-only bind is not.
 [[ "$PROBE_HOST" == "0.0.0.0" || "$PROBE_HOST" == "::" ]] && PROBE_HOST="127.0.0.1"

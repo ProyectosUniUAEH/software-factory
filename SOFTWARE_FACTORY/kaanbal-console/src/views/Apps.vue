@@ -40,6 +40,42 @@
       </Transition>
     </Teleport>
 
+    <!-- Vault: sellado o con secretos pendientes. Solo aparece si hay algo que atender. -->
+    <div
+      v-if="vaultState?.vault?.sealed"
+      class="rounded-xl border border-red-500/30 bg-red-500/5 px-4 py-3 flex items-start gap-3"
+    >
+      <span class="text-xl">🔒</span>
+      <div class="text-sm">
+        <p class="text-red-200 font-medium">Vault está sellado</p>
+        <p class="text-slate-400 text-xs mt-1">
+          Pasa tras un reinicio del servidor. Se desbloquea solo en unos 2 minutos; mientras tanto las
+          apps se despliegan igual y sus secretos se guardan en Vault al desbloquearse. Si esto persiste,
+          revisa el servidor: <span class="font-mono">systemctl status kaanbal-vault-unseal.timer</span>
+        </p>
+      </div>
+    </div>
+    <div
+      v-else-if="vaultState?.missing?.length"
+      class="rounded-xl border border-amber-500/30 bg-amber-500/5 px-4 py-3 flex items-center gap-3 flex-wrap"
+    >
+      <span class="text-xl">🔑</span>
+      <div class="text-sm flex-1 min-w-0">
+        <p class="text-amber-200 font-medium">
+          {{ vaultState.missing.length }} app(s) sin sus secretos en Vault
+        </p>
+        <p class="text-slate-400 text-xs mt-1 truncate">
+          {{ vaultState.missing.map(m => `${m.app} (${m.env})`).join(', ') }} · se desplegaron con Vault
+          sellado. Una app que se vincule a ellas no encontraría sus credenciales.
+        </p>
+      </div>
+      <button
+        @click="syncVault"
+        :disabled="vaultSyncing"
+        class="px-3 py-2 rounded-lg text-xs font-semibold bg-amber-500/20 border border-amber-500/40 text-amber-100 hover:bg-amber-500/30 disabled:opacity-50"
+      >{{ vaultSyncing ? 'Sincronizando…' : 'Sincronizar ahora' }}</button>
+    </div>
+
     <!-- Mover app a otro dominio -->
     <Teleport to="body">
       <Transition name="fade">
@@ -1514,6 +1550,37 @@ const privateLabel = (app) => {
   return PRIVATE_MODE_LABELS[mode] || 'sin exposición pública'
 }
 
+// ── Vault ────────────────────────────────────────────────────────────────
+// La API también reconcilia sola cada 2 minutos; el botón es para no esperar.
+const vaultState = ref(null)
+const vaultSyncing = ref(false)
+
+const loadVaultState = async () => {
+  try {
+    const { data } = await axios.get('/api/v1/core/vault')
+    vaultState.value = data
+  } catch (e) {
+    vaultState.value = null  // sin el endpoint (célula sin actualizar): no se muestra nada
+  }
+}
+
+const syncVault = async () => {
+  vaultSyncing.value = true
+  try {
+    const { data } = await axios.post('/api/v1/core/vault/reconcile')
+    const written = data.written?.length || 0
+    const failed = data.failed?.length || 0
+    if (failed) showToast('error', 'Vault', `${written} restaurado(s), ${failed} con error`)
+    else if (written) showToast('success', 'Vault', `${written} secreto(s) restaurado(s) en Vault`)
+    else showToast('info', 'Vault', data.reason || 'No había nada que sincronizar')
+  } catch (e) {
+    showToast('error', 'Vault', e.response?.data?.detail || 'No se pudo sincronizar')
+  } finally {
+    vaultSyncing.value = false
+    loadVaultState()
+  }
+}
+
 // ── Mover app a otro dominio ─────────────────────────────────────────────
 const availableDomains = ref([])
 const loadDomains = async () => {
@@ -2457,6 +2524,7 @@ const fetchApps = async () => {
 onMounted(() => {
   fetchApps()
   loadDomains()
+  loadVaultState()
 
   // Listen for global sync complete event
   window.addEventListener('kaanbal:sync-complete', onGlobalSyncComplete)

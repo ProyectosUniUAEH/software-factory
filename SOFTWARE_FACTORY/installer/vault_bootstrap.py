@@ -110,11 +110,44 @@ def bootstrap(run=execute, recovery_path=None, allow_init=True, timeout=120):
     return root
 
 
+def auto_unseal(run=execute, recovery_path=None):
+    """Desbloqueo tras reinicio, pensado para un timer de systemd. Devuelve un mensaje o None.
+
+    Vault se sella en cada reinicio del nodo. Si nadie lo desbloquea, los
+    despliegues no pueden guardar secretos. Este modo es silencioso cuando no
+    hay nada que hacer (Vault abierto o todavía arrancando) y nunca inicializa:
+    un Vault sin inicializar requiere una decisión humana, no un timer.
+
+    Sobre la seguridad: la llave ya vive en este mismo disco (RECOVERY_FILE, 600
+    root). Desbloquear automáticamente no la expone más de lo que ya está; lo que
+    sí evita es que cada reinicio deje la plataforma a medias.
+    """
+    _, raw = run(["-n", "vault", "exec", "deploy/vault", "--", "vault", "status", "-format=json"])
+    try:
+        status = json.loads(raw)
+    except (ValueError, TypeError):
+        return None  # Vault aún no arranca tras el reinicio; el timer reintenta
+    if not status.get("initialized") or not status.get("sealed"):
+        return None
+    path = Path(recovery_path or RECOVERY_FILE)
+    if not path.exists():
+        raise RuntimeError("Vault está sellado y no hay archivo de recuperación en este nodo")
+    bootstrap(run=run, recovery_path=path, allow_init=False, timeout=60)
+    return "Vault estaba sellado tras un reinicio: desbloqueado. No se generaron claves nuevas."
+
+
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Desbloquear Vault con la recuperación local protegida; no imprime claves")
-    parser.add_argument("--recover", action="store_true", required=True)
-    parser.parse_args()
+    mode = parser.add_mutually_exclusive_group(required=True)
+    mode.add_argument("--recover", action="store_true", help="Desbloqueo manual con verificación completa")
+    mode.add_argument("--auto", action="store_true", help="Solo si está sellado; silencioso si no hay nada que hacer")
+    args = parser.parse_args()
     try:
+        if args.auto:
+            message = auto_unseal()
+            if message:
+                print(message)
+            raise SystemExit(0)
         bootstrap(allow_init=False)
         print("Vault desbloqueado y KV v2 comprobado. No se generaron claves nuevas.")
     except Exception as exc:

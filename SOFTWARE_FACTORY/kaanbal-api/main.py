@@ -15,6 +15,7 @@ from contextlib import asynccontextmanager
 from time import perf_counter
 from uuid import uuid4
 
+import asyncio
 import os
 import logging
 
@@ -48,8 +49,13 @@ async def lifespan(app: FastAPI):
     # Startup
     await connect_db()
     await activity_log.init()
+    # Secretos que no llegaron a Vault (p. ej. se desplegó con Vault sellado tras
+    # un reinicio) se restauran solos cuando Vault vuelve a estar abierto.
+    from app.services import vault_sync
+    vault_task = asyncio.create_task(vault_sync.reconcile_loop())
     yield
     # Shutdown
+    vault_task.cancel()
     await close_db()
 
 

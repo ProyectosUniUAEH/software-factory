@@ -50,6 +50,11 @@ const router = createRouter({
             component: () => import('../views/Domains.vue')
         },
         {
+            path: '/security',
+            name: 'security',
+            component: () => import('../views/Security.vue')
+        },
+        {
             path: '/updates',
             name: 'updates',
             component: () => import('../views/Updates.vue')

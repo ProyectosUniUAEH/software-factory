@@ -20,8 +20,9 @@ import os
 import logging
 
 from app.config import settings
-from app.routers import apps, clients, config, webhooks, health, templates, setup, auth, system, admin, logs, domains, links, sites, core
+from app.routers import apps, clients, config, webhooks, health, templates, setup, auth, system, admin, logs, domains, links, sites, security, core
 from app.db import connect_db, close_db
+from app.middleware.acl import AccessControlMiddleware
 from app.services.activity_log import activity_log, CATEGORY_API, CATEGORY_ERROR
 
 logger = logging.getLogger(__name__)
@@ -49,6 +50,10 @@ async def lifespan(app: FastAPI):
     # Startup
     await connect_db()
     await activity_log.init()
+    # Roles del sistema y migración de las cuentas anteriores al catálogo de
+    # permisos: sin esto, al actualizar nadie tendría permisos.
+    from app.services import access_store
+    await access_store.ensure_seed()
     # Secretos que no llegaron a Vault (p. ej. se desplegó con Vault sellado tras
     # un reinicio) se restauran solos cuando Vault vuelve a estar abierto.
     from app.services import vault_sync
@@ -65,6 +70,12 @@ app = FastAPI(
     version="1.0.0",
     lifespan=lifespan
 )
+
+# Control de acceso: autentica (sesión o token personal) y exige el permiso
+# que declara el catálogo. Se agrega antes que CORS para que se ejecute después
+# (Starlette aplica los middlewares en orden inverso) y las respuestas 401/403
+# lleguen al navegador con sus cabeceras CORS.
+app.add_middleware(AccessControlMiddleware)
 
 # CORS - Origins built dynamically from DOMAIN env var (no hardcoded domains)
 app.add_middleware(
@@ -141,6 +152,7 @@ app.include_router(clients.router, prefix="/api/v1/clients", tags=["Clients"])
 app.include_router(domains.router, prefix="/api/v1/domains", tags=["Domains"])
 app.include_router(core.router, prefix="/api/v1/core", tags=["Core Updates"])
 app.include_router(links.router, prefix="/api/v1/links", tags=["Service Links"])
+app.include_router(security.router, prefix="/api/v1/security", tags=["Security"])
 app.include_router(sites.router, prefix="/api/v1/sites", tags=["Sites"])
 app.include_router(config.router, prefix="/api/v1/config", tags=["Config"])
 app.include_router(logs.router, prefix="/api/v1/logs", tags=["Activity Logs"])

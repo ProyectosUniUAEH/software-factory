@@ -47,6 +47,21 @@ async def get_current_user(token: str = Depends(oauth2_scheme)):
         detail="Could not validate credentials",
         headers={"WWW-Authenticate": "Bearer"},
     )
+
+    # Un token personal (kbl_...) no es un JWT: identifica a su dueño por la
+    # tabla de tokens. Resolverlo aquí hace que valga en toda la API sin tocar
+    # cada router; el alcance del token lo aplica el middleware de acceso.
+    from app.services import access, access_store
+
+    if access.looks_like_token(token):
+        principal = await access_store.principal_from_token(token)
+        if principal is None:
+            raise credentials_exception
+        user = await get_db().users.find_one({"username": principal.username})
+        if user is None:
+            raise credentials_exception
+        return User(**user)
+
     try:
         payload = jwt.decode(token, SECRET_KEY, algorithms=[ALGORITHM])
         username: str = payload.get("sub")

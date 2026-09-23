@@ -1492,6 +1492,42 @@ async def update_app_display_name(app_name: str, body: dict, current_user: User 
     }
 
 
+@router.get("/{app_name}/env-vars")
+async def list_app_env_var_names(app_name: str, env: str = "prod"):
+    """Nombres de las variables que recibe la app en un ambiente. **Nunca sus valores.**
+
+    Es lo que hace falta para entender por qué una app no arranca —el clásico
+    KeyError: 'MONGO_URI'— sin darle a nadie, ni a un agente conectado por MCP,
+    acceso a los secretos. Se leen del Secret que el pod tiene montado, que es
+    la verdad de lo que la app ve.
+    """
+    db = get_db()
+    app = await db.apps.find_one({"name": app_name}, {"name": 1, "environments": 1})
+    if not app:
+        raise HTTPException(status_code=404, detail="App not found")
+    if env not in (app.get("environments") or ["prod"]):
+        raise HTTPException(status_code=404, detail=f"{app_name} no tiene ambiente '{env}'")
+
+    from app.services import vault_sync
+
+    try:
+        by_namespace = await asyncio.to_thread(vault_sync._list_secrets_by_namespace, [env])
+        secret = vault_sync.app_secret_from(by_namespace.get(env, []), app_name)
+    except Exception as e:
+        logger.warning("No se pudieron listar los secretos de %s/%s: %s", env, app_name, e)
+        raise HTTPException(status_code=502, detail="No se pudo leer el estado del clúster")
+
+    if secret is None:
+        return {"app": app_name, "env": env, "secret": None, "names": [], "detail": "La app no tiene secretos montados en ese ambiente."}
+
+    return {
+        "app": app_name,
+        "env": env,
+        "secret": secret.metadata.name,
+        "names": sorted((secret.data or {}).keys()),
+    }
+
+
 @router.post("/{app_name}/bindings/repair")
 async def repair_app_bindings(app_name: str, current_user: User = Depends(get_current_active_user)):
     """Publicar los nombres convencionales de la base vinculada en una app ya desplegada.

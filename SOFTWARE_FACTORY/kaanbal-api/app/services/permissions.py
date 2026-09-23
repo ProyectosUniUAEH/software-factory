@@ -153,6 +153,9 @@ ACL_RULES: Tuple[AclRule, ...] = (
     rule("POST", rf"{_V1}/apps/{_SEG}/analyze", "apps.apps.diagnose"),
     rule("GET", rf"{_V1}/apps/{_SEG}/repo-status", "apps.apps.diagnose"),
     rule("POST", rf"{_V1}/apps/{_SEG}/refresh-status", "apps.apps.view"),
+    # Solo los nombres de las variables, nunca sus valores: por eso alcanza con
+    # diagnose y no hace falta system.secrets.view.
+    rule("GET", rf"{_V1}/apps/{_SEG}/env-vars", "apps.apps.diagnose"),
     rule("POST", rf"{_V1}/apps/{_SEG}/bindings/repair", "apps.apps.deploy"),
     rule("GET", rf"{_V1}/apps/{_SEG}/environments/{_SEG}", "apps.apps.view"),
     rule("POST", rf"{_V1}/apps/{_SEG}/environments/{_SEG}", "apps.apps.deploy"),

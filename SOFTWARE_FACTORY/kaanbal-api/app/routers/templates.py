@@ -929,13 +929,6 @@ async def get_category(category_id: str):
 
 # ============ CATALOG V4: STACKS ============
 
-class StackDeployRequest(BaseModel):
-    """Request to deploy a stack"""
-    name: str  # Base name for the apps (e.g., "my-project")
-    environment: str = "dev"
-    exposure_mode: str = "tailscale"  # public, tailscale, both, internal
-    config: Optional[Dict] = None  # Optional per-component config overrides
-
 
 @router.get("/catalog/stacks")
 async def get_stacks(popular_only: bool = False):
@@ -979,131 +972,9 @@ async def get_stack_details(stack_id: str):
         raise HTTPException(status_code=500, detail=str(e))
 
 
-@router.post("/catalog/stacks/{stack_id}/deploy")
-async def deploy_stack(
-    stack_id: str,
-    request: StackDeployRequest,
-    background_tasks: BackgroundTasks,
-    current_user = Depends(get_current_active_user)
-):
-    """
-    Deploy an entire stack (multiple apps at once).
-    
-    This will:
-    1. Create all component apps with proper naming
-    2. Wire them together (environment variables, connections)
-    3. Deploy in the correct order (databases first, then backends, then frontends)
-    """
-    try:
-        stack = await template_service.get_stack_details(stack_id)
-        if not stack:
-            raise HTTPException(status_code=404, detail=f"Stack '{stack_id}' not found")
-        
-        db = get_db()
-        
-        # Create stack record
-        stack_record = {
-            "stack_id": stack_id,
-            "stack_name": stack.get("name"),
-            "name": request.name,
-            "environment": request.environment,
-            "exposure_mode": request.exposure_mode,
-            "config": request.config or {},
-            "components": [],
-            "status": "creating",
-            "created_at": datetime.utcnow(),
-            "created_by": current_user.username
-        }
-        
-        # Determine deploy order (databases → backends → frontends)
-        deploy_order = ["database", "backend", "frontend", "workflow", "monitoring"]
-        sorted_components = sorted(
-            stack.get("components", []),
-            key=lambda c: deploy_order.index(c.get("template_details", {}).get("category", "backend")) 
-                if c.get("template_details", {}).get("category") in deploy_order else 99
-        )
-        
-        apps_created = []
-        
-        for component in sorted_components:
-            component_name = f"{request.name}-{component['name']}"
-            template_id = component["template"]
-            
-            # Get template details for config
-            template = component.get("template_details", {})
-            
-            # Prepare app config
-            app_doc = {
-                "name": component_name,
-                "template_id": template_id,
-                "stack_id": stack_id,
-                "stack_name": request.name,
-                "component_name": component["name"],
-                "status": "pending",
-                "environment": request.environment,
-                "exposure_mode": component.get("exposure", request.exposure_mode),
-                "port": template.get("port", 80),
-                "config": component.get("defaults", {}),
-                "created_at": datetime.utcnow(),
-                "created_by": current_user.username
-            }
-            
-            # Apply wiring (inject environment variables)
-            wiring = component.get("wiring", {})
-            env_vars = {}
-            for var_name, source_spec in wiring.items():
-                # Source spec like "database.connection_string"
-                parts = source_spec.split(".")
-                if len(parts) == 2:
-                    source_component, source_prop = parts
-                    # Find the source app we created
-                    source_app = next((a for a in apps_created if a["component_name"] == source_component), None)
-                    if source_app:
-                        # Generate the connection string based on the template type
-                        if source_prop == "connection_string" and source_app.get("template_id") == "mongodb":
-                            env_vars[var_name] = f"mongodb://{source_app['name']}.{request.environment}.svc.cluster.local:27017/{request.name}"
-                        elif source_prop == "url":
-                            port = source_app.get("port", 80)
-                            env_vars[var_name] = f"http://{source_app['name']}.{request.environment}.svc.cluster.local:{port}"
-            
-            app_doc["env_vars"] = env_vars
-            
-            # Insert app
-            result = await db.apps.insert_one(app_doc)
-            app_doc["_id"] = str(result.inserted_id)
-            apps_created.append(app_doc)
-            
-            stack_record["components"].append({
-                "name": component["name"],
-                "app_id": str(result.inserted_id),
-                "app_name": component_name,
-                "template_id": template_id,
-                "status": "pending"
-            })
-        
-        # Save stack record
-        result = await db.stacks.insert_one(stack_record)
-        stack_record["_id"] = str(result.inserted_id)
-        
-        logger.info(f"Stack '{stack_id}' deployed as '{request.name}' by {current_user.username}")
-        
-        return {
-            "message": f"Stack '{stack.get('name')}' deployment started",
-            "stack_instance_id": str(stack_record["_id"]),
-            "name": request.name,
-            "apps_created": [{"name": a["name"], "template": a["template_id"]} for a in apps_created],
-            "status": "creating",
-            "next_steps": [
-                "Apps are being provisioned",
-                "Check /stacks/{stack_instance_id}/status for progress"
-            ]
-        }
-        
-    except HTTPException:
-        raise
-    except Exception as e:
-        logger.error(f"Error deploying stack {stack_id}: {e}")
-        raise HTTPException(status_code=500, detail=str(e))
+# El despliegue de stacks vive en app/routers/stacks.py (POST /api/v1/stacks).
+# El que había aquí insertaba documentos sueltos en Mongo con otro esquema y no
+# llamaba al deployer: dejaba apps fantasma sin repositorio ni manifiestos.
 
 
 # ============ CATALOG V4: EXPOSURE MODES ============

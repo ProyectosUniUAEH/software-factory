@@ -259,7 +259,47 @@
       }
     }
   ],
-  "stacks": [],
+  "stacks": [
+    {
+      "id": "vue-fastapi-mongo",
+      "name": "Vue + FastAPI + MongoDB",
+      "description": "Sitio Vue 3, API FastAPI vinculada a su Mongo. La API queda publicada y la base solo dentro del clúster.",
+      "icon": "🧩",
+      "color": "#42b883",
+      "popular": true,
+      "components": [
+        {"role": "database", "template": "mongodb", "suffix": "-db", "exposure": "internal"},
+        {"role": "backend", "template": "fastapi-api", "suffix": "-api", "exposure": "public", "binds": "database"},
+        {"role": "frontend", "template": "vue3-spa", "suffix": "", "exposure": "public", "consumes": "backend", "can_be_homepage": true}
+      ]
+    },
+    {
+      "id": "vue-fastapi-postgres",
+      "name": "Vue + FastAPI + PostgreSQL",
+      "description": "El mismo sitio con PostgreSQL: para datos relacionales, migraciones y reportes.",
+      "icon": "🐘",
+      "color": "#336791",
+      "popular": true,
+      "components": [
+        {"role": "database", "template": "postgres", "suffix": "-db", "exposure": "internal"},
+        {"role": "backend", "template": "fastapi-api", "suffix": "-api", "exposure": "public", "binds": "database"},
+        {"role": "frontend", "template": "vue3-spa", "suffix": "", "exposure": "public", "consumes": "backend", "can_be_homepage": true}
+      ]
+    },
+    {
+      "id": "react-fastapi-postgres",
+      "name": "React + FastAPI + PostgreSQL",
+      "description": "Igual que el anterior, con React en el frontend.",
+      "icon": "⚛️",
+      "color": "#61dafb",
+      "popular": false,
+      "components": [
+        {"role": "database", "template": "postgres", "suffix": "-db", "exposure": "internal"},
+        {"role": "backend", "template": "fastapi-api", "suffix": "-api", "exposure": "public", "binds": "database"},
+        {"role": "frontend", "template": "react-spa", "suffix": "", "exposure": "public", "consumes": "backend", "can_be_homepage": true}
+      ]
+    }
+  ],
   "exposure_modes": {
     "public": {"name": "Public (HTTPS)", "icon": "🌐", "description": "Ingress + Cloudflare subdomain"},
     "tailscale": {"name": "Private VPN", "icon": "🔒", "description": "Tailscale MagicDNS"},

@@ -39,6 +39,14 @@ export const allocateHomepageName = (fqdn, takenNames = []) => {
   }
 }
 
+// Host público de una app, misma regla que la API (domain_service.public_host):
+// prod vive en <app>.<dominio> —o en el dominio desnudo si ocupa la raíz— y el
+// resto de ambientes en <env>-<app>.<dominio>.
+export const publicHost = (appName, env, fqdn, { isRoot = false } = {}) => {
+  if (env === 'prod') return isRoot ? fqdn : `${appName}.${fqdn}`
+  return `${env}-${appName}.${fqdn}`
+}
+
 // Grupo del sitio: el nombre del homepage sin el sufijo ('sibo-homepage' → 'sibo').
 export const siteGroup = (homepageAppName) => {
   const name = (homepageAppName || '').trim().toLowerCase()

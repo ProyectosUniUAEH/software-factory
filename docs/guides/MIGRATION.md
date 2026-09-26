@@ -65,3 +65,19 @@ El repo oficial es el valor por defecto; se puede cambiar sin reconstruir nada:
 El upgrade es una transacción con verificación y **rollback automático**: si los pods no
 quedan sanos, se restauran las imágenes anteriores. La migración solo cambia dónde se
 buscan actualizaciones; volver atrás es `git -C ~/kaanbal-source remote set-url origin <url-anterior>`.
+
+## Dispositivos de Tailscale que la limpieza no toca
+
+La limpieza de dispositivos huérfanos de Tailscale borra los que no pertenecen a ninguna app.
+Hasta la v1.0.0 había un nombre de máquina escrito en el código para protegerla; ahora los
+prefijos que nunca se tocan salen de la configuración de cada instalación:
+`system_config.tailscale_protected_prefixes`, una lista de prefijos. Los de la plataforma
+(`tailscale-operator`, `vault-`) van siempre.
+
+Si tus máquinas personales están en la tailnet, declara su nombre **antes** de ejecutar
+`cleanup-tailscale`. Es un prefijo porque Tailscale renombra los duplicados (`equipo-1`):
+
+```javascript
+// mongosh, en el pod del datastore
+db.system_config.updateOne({_id: "main"}, {$set: {tailscale_protected_prefixes: ["mi-portatil"]}})
+```

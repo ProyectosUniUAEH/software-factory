@@ -60,7 +60,7 @@ class ScaffoldUnavailableError(Exception):
 
 from app.models import AppCreate, WebhookDeployRequest, CreationMode
 from app.db import get_db
-from app.services import db_env
+from app.services import db_env, tailscale_guard
 from app.services.template_service import TemplateService
 from app.services.template_spec import TemplateSpec
 from app.services.git_provider import GitProvider, get_git_provider, build_provider_from_config
@@ -4394,8 +4394,10 @@ patches:
         result["enabled"] = True
         devices = await self._list_tailscale_devices(api_token)
 
-        # System hostnames to never touch
-        system_prefixes = ("tailscale-operator", "vault-", "andresbc")
+        # Dispositivos que nunca se tocan: los de la plataforma, más los que la
+        # instalación declare en system_config.tailscale_protected_prefixes (sus
+        # propias máquinas). Ver app/services/tailscale_guard.py.
+        system_prefixes = tailscale_guard.DEFAULT_PROTECTED_PREFIXES
 
         # Build known hostnames set: standard patterns + stored tailscale_hostname from DB
         known_hostnames = set()
@@ -4420,6 +4422,7 @@ patches:
         # Also load infra_tailscale_hostnames from system_config (manually managed services)
         ts_dns_suffix = self._credentials.get("tailscale_dns_suffix", TAILSCALE_DNS_SUFFIX)
         config = await db.system_config.find_one({"_id": "main"})
+        system_prefixes = tailscale_guard.protected_prefixes(config)
         if config:
             for h in config.get("infra_tailscale_hostnames", []):
                 # Strip FQDN suffix if present, store the bare hostname

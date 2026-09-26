@@ -1,5 +1,11 @@
 # Kaanbal
 
+> **Este repositorio se mudó.** El proyecto continúa en
+> **<https://github.com/kaanbal-softwarefactory/software-factory>** (v1.0.0, Apache-2.0)
+> y aquí ya no se publican cambios. Si tienes una célula instalada desde este
+> repositorio, sigue la [guía de migración](docs/guides/MIGRATION.md): son dos
+> actualizaciones desde la consola y no se toca ninguna app ni dato.
+
 Kaanbal instala y administra aplicaciones en un servidor propio usando GitHub,
 GitOps y Argo CD. Las aplicaciones pueden exponerse en LAN, VPN o públicamente.
 
@@ -17,7 +23,7 @@ El recorrido completo de Ubuntu, clave SSH, alias, túnel y navegador está en e
 ejecuta dentro de la sesión SSH del servidor:
 
 ```bash
-( set -e; if ! command -v curl >/dev/null; then sudo apt-get update; sudo apt-get install -y curl ca-certificates; fi; revision=main; script=$(mktemp); trap 'rm -f "$script"' EXIT; curl --fail --show-error --location "https://raw.githubusercontent.com/ProyectosUniUAEH/software-factory/${revision}/install.sh" --output "$script"; bash "$script" --ref "$revision" --reset --lan )
+( set -e; if ! command -v curl >/dev/null; then sudo apt-get update; sudo apt-get install -y curl ca-certificates; fi; revision=main; script=$(mktemp); trap 'rm -f "$script"' EXIT; curl --fail --show-error --location "https://raw.githubusercontent.com/kaanbal-softwarefactory/software-factory/${revision}/install.sh" --output "$script"; bash "$script" --ref "$revision" --reset --lan )
 ```
 
 Usa un SHA aprobado en lugar de `main` para repetir exactamente el código de una

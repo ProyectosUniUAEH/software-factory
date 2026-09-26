@@ -19,7 +19,9 @@ Solo lectura. Aplicar un upgrade es otra cosa y vive en su propio modulo.
 """
 
 import logging
-from typing import Any, Dict, List, Optional
+import os
+import re
+from typing import Any, Dict, List, Optional, Tuple
 
 import httpx
 
@@ -30,8 +32,17 @@ logger = logging.getLogger(__name__)
 GITHUB_API = "https://api.github.com"
 
 # Repo publico que publica las releases del engine.
-UPSTREAM_OWNER = "ProyectosUniUAEH"
-UPSTREAM_REPO = "software-factory"
+#
+# Es configurable porque el proyecto ya cambio de casa una vez y una celula no
+# debe necesitar una imagen nueva para saber donde buscar actualizaciones. Orden:
+# ajuste de la celula (system_config.core_upstream) -> KAANBAL_UPSTREAM -> este.
+DEFAULT_UPSTREAM = "kaanbal-softwarefactory/software-factory"
+UPSTREAM_ENV = "KAANBAL_UPSTREAM"
+# Donde vivia el proyecto antes de la v1. Se conserva para reconocer en logs y
+# docs las celulas instaladas alli: su commit ya no existe en el historial nuevo.
+LEGACY_UPSTREAM = "ProyectosUniUAEH/software-factory"
+
+_UPSTREAM_RE = re.compile(r"^([A-Za-z0-9][A-Za-z0-9-]{0,38})/([A-Za-z0-9._-]{1,100})$")
 
 # Los tres componentes que forman el engine. Coincide con
 # installer/corebuild.py: CORE_COMPONENTS.
@@ -54,6 +65,38 @@ async def _config() -> Dict[str, Any]:
     return await db.system_config.find_one({"_id": "main"}) or {}
 
 
+def parse_upstream(value: Any) -> Optional[Tuple[str, str]]:
+    """'owner/repo' -> (owner, repo); None si no es un repo de GitHub valido.
+
+    El valor termina en una URL de API y en el `git clone` de un Job, asi que
+    solo pasan los caracteres que GitHub permite: sin esquemas, sin rutas extra.
+    """
+    text = str(value or "").strip()
+    if text.endswith(".git"):
+        text = text[: -len(".git")]
+    match = _UPSTREAM_RE.match(text)
+    if not match or match.group(2) in (".", ".."):
+        return None
+    return match.group(1), match.group(2)
+
+
+async def get_upstream(config: Optional[Dict[str, Any]] = None) -> Tuple[str, str]:
+    """Repo del que esta celula recibe actualizaciones: (owner, repo).
+
+    Un valor invalido se ignora en vez de romper las actualizaciones: una celula
+    que ya no puede consultar upstream tampoco puede arreglarse desde la consola.
+    """
+    if config is None:
+        config = await _config()
+    for candidate in (config.get("core_upstream"), os.environ.get(UPSTREAM_ENV), DEFAULT_UPSTREAM):
+        parsed = parse_upstream(candidate)
+        if parsed:
+            return parsed
+        if candidate:
+            logger.warning("Upstream invalido ignorado: %r", candidate)
+    return parse_upstream(DEFAULT_UPSTREAM)  # type: ignore[return-value]
+
+
 async def read_provenance() -> Dict[str, Any]:
     """Que version corre esta celula.
 
@@ -69,6 +112,7 @@ async def read_provenance() -> Dict[str, Any]:
             "channel": CHANNEL_STABLE,
             "version": "unknown",
             "upstream_sha": None,
+            "upstream": None,
             "components": {},
             "reason": (
                 "Esta celula se instalo antes de que se registrara la "
@@ -80,6 +124,7 @@ async def read_provenance() -> Dict[str, Any]:
         "channel": release.get("channel") or CHANNEL_STABLE,
         "version": release.get("version") or "unknown",
         "upstream_sha": release.get("upstream_sha"),
+        "upstream": release.get("upstream"),
         "components": release.get("components") or {},
         "applied_at": release.get("applied_at"),
         "applied_by": release.get("applied_by"),
@@ -90,7 +135,8 @@ async def list_releases(limit: int = 20) -> List[Dict[str, Any]]:
     """Releases publicadas upstream, de la mas nueva a la mas vieja."""
     config = await _config()
     token = config.get("github_token") or config.get("git_token") or ""
-    url = f"{GITHUB_API}/repos/{UPSTREAM_OWNER}/{UPSTREAM_REPO}/releases?per_page={limit}"
+    owner, repo = await get_upstream(config)
+    url = f"{GITHUB_API}/repos/{owner}/{repo}/releases?per_page={limit}"
     try:
         async with httpx.AsyncClient(timeout=20) as client:
             resp = await client.get(url, headers=_gh_headers(token))
@@ -146,7 +192,8 @@ async def upstream_commits(base_sha: Optional[str], branch: str = "main") -> Dic
     """
     config = await _config()
     token = config.get("github_token") or config.get("git_token") or ""
-    repo_url = f"{GITHUB_API}/repos/{UPSTREAM_OWNER}/{UPSTREAM_REPO}"
+    owner, repo = await get_upstream(config)
+    repo_url = f"{GITHUB_API}/repos/{owner}/{repo}"
     try:
         async with httpx.AsyncClient(timeout=20) as client:
             head_resp = await client.get(f"{repo_url}/commits/{branch}", headers=_gh_headers(token))
@@ -166,6 +213,22 @@ async def upstream_commits(base_sha: Optional[str], branch: str = "main") -> Dic
                         "commits": [], "components": [], "touches_engine": False}
 
             cmp_resp = await client.get(f"{repo_url}/compare/{base_sha}...{head_sha}", headers=_gh_headers(token))
+            if cmp_resp.status_code in (404, 422):
+                # GitHub no conoce ese commit en este repo: la celula salio de otro
+                # (el proyecto se mudo) o el historial se reescribio. No hay que
+                # comparar, pero si algo que ofrecer: la ultima revision. Sin esto
+                # la consola diria "no se pudo comparar" y la celula quedaria
+                # atada a un repo que ya nadie mantiene, sin aviso.
+                return {
+                    "available": True, "head_sha": head_sha, "ahead_by": None,
+                    "commits": [], "components": [], "touches_engine": True,
+                    "history_unknown": True,
+                    "reason": (
+                        f"El commit instalado ({base_sha[:7]}) no existe en {owner}/{repo}: "
+                        f"el proyecto se mudó o reescribió su historial. "
+                        f"Se ofrece la última revisión de {branch}."
+                    ),
+                }
             if cmp_resp.status_code != 200:
                 return {"available": False, "reason": f"No se pudo comparar {base_sha[:7]} con {branch}"}
             cmp = cmp_resp.json()
@@ -287,6 +350,8 @@ async def check_updates() -> Dict[str, Any]:
     provenance = await read_provenance()
     drift = await detect_drift()
     channel = provenance.get("channel") or CHANNEL_STABLE
+    owner, repo = await get_upstream()
+    source = f"{owner}/{repo}"
 
     if channel == CHANNEL_DEV:
         # dev sigue commits de main: cada commit que toca el engine es un upgrade
@@ -297,6 +362,7 @@ async def check_updates() -> Dict[str, Any]:
         return {
             "current": provenance,
             "channel": channel,
+            "source": source,
             "tracking": "commits",
             "upstream": upstream,
             "latest": {"version": f"dev-{upstream['head_sha'][:7]}", "sha": upstream["head_sha"]}
@@ -330,6 +396,7 @@ async def check_updates() -> Dict[str, Any]:
     return {
         "current": provenance,
         "channel": channel,
+        "source": source,
         "tracking": "releases",
         "latest": latest,
         "update_available": update_available,
@@ -346,6 +413,7 @@ async def write_provenance(
     components: Dict[str, Any],
     channel: str = CHANNEL_STABLE,
     applied_by: str = "installer",
+    upstream: Optional[str] = None,
 ) -> Dict[str, Any]:
     """Fija la procedencia de la celula. La escribe el instalador y cada upgrade."""
     from datetime import datetime
@@ -354,6 +422,9 @@ async def write_provenance(
     release = {
         "version": version,
         "upstream_sha": upstream_sha,
+        # De que repo salio ese SHA: sin esto, un SHA "desconocido" no se puede
+        # distinguir de una celula que vino de otro origen.
+        "upstream": upstream,
         "components": components,
         "channel": channel,
         "applied_at": datetime.utcnow(),

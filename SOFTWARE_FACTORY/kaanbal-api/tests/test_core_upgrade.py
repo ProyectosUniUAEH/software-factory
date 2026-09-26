@@ -59,6 +59,36 @@ class ManifestTests(unittest.TestCase):
             with self.assertRaises(cu.UpgradeError, msg=bad):
                 self._manifest(ref=bad)
 
+    def _env(self, manifest):
+        container = manifest["spec"]["template"]["spec"]["containers"][0]
+        return {e["name"]: e["value"] for e in container["env"]}
+
+    def test_the_official_repo_is_cloned_by_default(self):
+        self.assertEqual(
+            self._env(self._manifest())["UPSTREAM_REPO"],
+            "https://github.com/kaanbal-softwarefactory/software-factory.git",
+        )
+
+    def test_clones_the_upstream_the_cell_is_configured_for(self):
+        manifest = self._manifest(upstream_repo="https://github.com/acme/fork.git")
+        self.assertEqual(self._env(manifest)["UPSTREAM_REPO"], "https://github.com/acme/fork.git")
+        self.assertEqual(
+            manifest["metadata"]["annotations"]["kaanbal-engine.io/upstream"],
+            "https://github.com/acme/fork.git",
+        )
+
+    def test_the_upstream_never_travels_inside_the_script(self):
+        script = self._manifest(upstream_repo="https://github.com/acme/fork.git")[
+            "spec"]["template"]["spec"]["containers"][0]["command"][2]
+        self.assertNotIn("acme/fork", script)
+
+    def test_rejects_upstreams_that_are_not_github_https_repos(self):
+        for bad in ("http://github.com/a/b.git", "https://evil.example/a/b.git", "https://github.com/a/b",
+                    "git@github.com:a/b.git", "https://github.com/a/b.git; rm -rf /",
+                    "https://github.com/a/b.git\nx", "https://user:pw@github.com/a/b.git", ""):
+            with self.assertRaises(cu.UpgradeError, msg=bad):
+                self._manifest(upstream_repo=bad)
+
     def test_rejects_invalid_org(self):
         for bad in ("org; id", "../x", ""):
             with self.assertRaises(cu.UpgradeError, msg=bad):
@@ -135,6 +165,19 @@ class StartUpgradeTests(unittest.TestCase):
     def test_requires_github_org(self):
         with self.assertRaises(cu.UpgradeError):
             self._start([], config={})
+
+    def test_uses_the_upstream_configured_in_the_cell(self):
+        batch, result = self._start([], config={"github_org": "acme", "core_upstream": "acme/fork"})
+        container = batch.created[0]["spec"]["template"]["spec"]["containers"][0]
+        env = {e["name"]: e["value"] for e in container["env"]}
+        self.assertEqual(env["UPSTREAM_REPO"], "https://github.com/acme/fork.git")
+        self.assertEqual(result["upstream"], "acme/fork")
+
+    def test_without_configuration_it_uses_the_official_repo(self):
+        with mock.patch.dict(os.environ):
+            os.environ.pop("KAANBAL_UPSTREAM", None)
+            _, result = self._start([])
+        self.assertEqual(result["upstream"], "kaanbal-softwarefactory/software-factory")
 
 
 if __name__ == "__main__":

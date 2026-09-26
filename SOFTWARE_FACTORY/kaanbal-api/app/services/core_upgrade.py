@@ -20,6 +20,7 @@ import time
 from typing import Any, Dict, List, Optional
 
 from app.db import get_db
+from app.services import core_release
 
 logger = logging.getLogger(__name__)
 
@@ -27,7 +28,19 @@ NAMESPACE = "prod"
 SERVICE_ACCOUNT = "kaanbal-upgrader"
 COMPONENT_LABEL = "kaanbal-engine.io/component"
 COMPONENT_VALUE = "upgrader"
-UPSTREAM_REPO = "https://github.com/ProyectosUniUAEH/software-factory.git"
+
+# Donde el Job descarga el monorepo. Sale del ajuste de la celula (ver
+# core_release.get_upstream): fijarlo aqui ataria la celula a un repo para siempre.
+_CLONE_URL_RE = re.compile(
+    r"^https://github\.com/[A-Za-z0-9][A-Za-z0-9-]{0,38}/[A-Za-z0-9._-]{1,100}\.git$"
+)
+
+
+def upstream_clone_url(owner: str, repo: str) -> str:
+    return f"https://github.com/{owner}/{repo}.git"
+
+
+DEFAULT_UPSTREAM_URL = upstream_clone_url(*core_release.parse_upstream(core_release.DEFAULT_UPSTREAM))
 
 # Imagen con bash, git, kubectl, python3 y curl. El tag se alinea con la versión
 # del clúster: kubectl solo garantiza compatibilidad a ±1 versión menor.
@@ -54,12 +67,18 @@ def tools_image_for(server_version: Optional[str]) -> str:
     return f"{TOOLS_IMAGE}:{match.group(1)}.{match.group(2)}.0"
 
 
-def build_job_manifest(*, name: str, org: str, ref: str, actor: str, image: str) -> Dict[str, Any]:
+def build_job_manifest(
+    *, name: str, org: str, ref: str, actor: str, image: str,
+    upstream_repo: str = DEFAULT_UPSTREAM_URL,
+) -> Dict[str, Any]:
     """Manifiesto del Job de upgrade. Puro: sin clúster, para poder testearlo."""
     if not _REF_RE.match(ref or ""):
         raise UpgradeError(f"Revisión inválida: {ref!r}")
     if not re.match(r"^[A-Za-z0-9][A-Za-z0-9-]{0,38}$", org or ""):
         raise UpgradeError(f"Org de GitHub inválida: {org!r}")
+    # Va como variable de entorno a un `git clone`: solo https a github.com.
+    if not _CLONE_URL_RE.match(upstream_repo or ""):
+        raise UpgradeError(f"Repositorio upstream inválido: {upstream_repo!r}")
 
     # El ref y la org ya están validados; aun así viajan como variables de
     # entorno y no interpolados en el script, para que nunca se interpreten.
@@ -82,6 +101,7 @@ def build_job_manifest(*, name: str, org: str, ref: str, actor: str, image: str)
             "annotations": {
                 "kaanbal-engine.io/actor": actor,
                 "kaanbal-engine.io/ref": ref,
+                "kaanbal-engine.io/upstream": upstream_repo,
             },
         },
         "spec": {
@@ -101,7 +121,7 @@ def build_job_manifest(*, name: str, org: str, ref: str, actor: str, image: str)
                         "image": image,
                         "command": ["bash", "-c", script],
                         "env": [
-                            {"name": "UPSTREAM_REPO", "value": UPSTREAM_REPO},
+                            {"name": "UPSTREAM_REPO", "value": upstream_repo},
                             {"name": "UPGRADE_REF", "value": ref},
                             {"name": "KAANBAL_ORG", "value": org},
                             {"name": "KAANBAL_SOURCE", "value": "/work/sf"},
@@ -183,13 +203,15 @@ async def start_upgrade(*, actor: str, ref: str = "main") -> Dict[str, Any]:
     except Exception:
         server_version = None
 
+    owner, repo = await core_release.get_upstream(config)
     name = f"kaanbal-upgrade-{int(time.time())}"
     manifest = build_job_manifest(
         name=name, org=org, ref=ref, actor=actor, image=tools_image_for(server_version),
+        upstream_repo=upstream_clone_url(owner, repo),
     )
     batch.create_namespaced_job(NAMESPACE, manifest)
-    logger.info("Upgrade %s lanzado por %s (ref=%s)", name, actor, ref)
-    return {"name": name, "state": "running", "ref": ref, "actor": actor}
+    logger.info("Upgrade %s lanzado por %s (ref=%s, upstream=%s/%s)", name, actor, ref, owner, repo)
+    return {"name": name, "state": "running", "ref": ref, "actor": actor, "upstream": f"{owner}/{repo}"}
 
 
 async def upgrade_status(name: Optional[str] = None) -> Dict[str, Any]:

@@ -49,7 +49,7 @@ def run(coro):
 
 CONFIG_WITH_PROVENANCE = {
     "_id": "main",
-    "github_org": "ProyectosUniUAEH",
+    "github_org": "acme-org",
     "github_token": "tok",
     "core_release": {
         "version": "v1.0.0",
@@ -213,6 +213,163 @@ class DriftTests(unittest.TestCase):
         with mock.patch.object(cr, "get_db", return_value=db):
             got = run(cr.detect_drift())
         self.assertFalse(got["detectable"])
+
+
+class FakeResponse:
+    def __init__(self, status_code=200, payload=None):
+        self.status_code = status_code
+        self._payload = {} if payload is None else payload
+        self.text = ""
+
+    def json(self):
+        return self._payload
+
+
+class FakeGitHub:
+    """Sustituye httpx.AsyncClient: contesta por fragmento de URL y anota lo pedido."""
+
+    def __init__(self, routes):
+        self.routes = routes
+        self.requested = []
+
+    def __call__(self, *args, **kwargs):
+        return self
+
+    async def __aenter__(self):
+        return self
+
+    async def __aexit__(self, *exc):
+        return False
+
+    async def get(self, url, headers=None):
+        self.requested.append(url)
+        for fragment, response in self.routes:
+            if fragment in url:
+                return response
+        return FakeResponse(404)
+
+
+HEAD = "h" * 40
+BASE = "b" * 40
+
+
+class UpstreamConfigTests(unittest.TestCase):
+    """El proyecto ya cambió de casa una vez: dónde buscar no puede ir fijo en la imagen."""
+
+    def test_parses_owner_and_repo(self):
+        self.assertEqual(cr.parse_upstream("acme/fork"), ("acme", "fork"))
+        self.assertEqual(cr.parse_upstream(" acme/fork.git "), ("acme", "fork"))
+
+    def test_rejects_anything_that_is_not_an_owner_repo_pair(self):
+        for bad in ("", None, "acme", "acme/", "/fork", "https://github.com/acme/fork",
+                    "acme/fork/extra", "acme/fo rk", "acme/fork;rm -rf /", "-acme/fork",
+                    "acme/..", "a" * 40 + "/repo"):
+            self.assertIsNone(cr.parse_upstream(bad), bad)
+
+    def test_the_official_repo_is_the_default(self):
+        with mock.patch.dict(os.environ):
+            os.environ.pop(cr.UPSTREAM_ENV, None)
+            self.assertEqual(run(cr.get_upstream({})), ("kaanbal-softwarefactory", "software-factory"))
+
+    def test_cell_setting_beats_environment_beats_default(self):
+        with mock.patch.dict(os.environ, {cr.UPSTREAM_ENV: "env-org/env-repo"}):
+            self.assertEqual(run(cr.get_upstream({})), ("env-org", "env-repo"))
+            self.assertEqual(run(cr.get_upstream({"core_upstream": "cell/fork"})), ("cell", "fork"))
+
+    def test_an_invalid_setting_never_breaks_updates(self):
+        with mock.patch.dict(os.environ):
+            os.environ.pop(cr.UPSTREAM_ENV, None)
+            self.assertEqual(
+                run(cr.get_upstream({"core_upstream": "https://evil.example/x"})),
+                ("kaanbal-softwarefactory", "software-factory"),
+            )
+
+
+class UpstreamCommitsTests(unittest.TestCase):
+    def _commits(self, routes, config=None, base=BASE):
+        github = FakeGitHub(routes)
+        db = FakeDB(config or {"_id": "main"})
+        with mock.patch.dict(os.environ), \
+             mock.patch.object(cr, "get_db", return_value=db), \
+             mock.patch.object(cr.httpx, "AsyncClient", new=github):
+            os.environ.pop(cr.UPSTREAM_ENV, None)
+            return run(cr.upstream_commits(base)), github
+
+    def test_a_commit_missing_from_the_new_repo_offers_the_latest_revision(self):
+        """La célula salió del repo anterior: su SHA no existe aquí, pero hay algo que ofrecer."""
+        got, _ = self._commits([("/commits/main", FakeResponse(200, {"sha": HEAD})),
+                                ("/compare/", FakeResponse(404))])
+        self.assertTrue(got["available"])
+        self.assertTrue(got["history_unknown"])
+        self.assertTrue(got["touches_engine"])
+        self.assertIsNone(got["ahead_by"])
+        self.assertEqual(got["head_sha"], HEAD)
+        self.assertIn("kaanbal-softwarefactory/software-factory", got["reason"])
+
+    def test_a_422_from_github_means_the_same_thing(self):
+        got, _ = self._commits([("/commits/main", FakeResponse(200, {"sha": HEAD})),
+                                ("/compare/", FakeResponse(422))])
+        self.assertTrue(got["history_unknown"])
+
+    def test_a_rate_limit_is_not_reported_as_a_moved_project(self):
+        got, _ = self._commits([("/commits/main", FakeResponse(200, {"sha": HEAD})),
+                                ("/compare/", FakeResponse(403))])
+        self.assertFalse(got["available"])
+        self.assertNotIn("history_unknown", got)
+
+    def test_asks_the_official_repo_by_default(self):
+        _, github = self._commits([("/commits/main", FakeResponse(200, {"sha": HEAD})),
+                                   ("/compare/", FakeResponse(404))])
+        self.assertTrue(all("/repos/kaanbal-softwarefactory/software-factory/" in u for u in github.requested))
+
+    def test_asks_the_repo_the_cell_is_configured_for(self):
+        _, github = self._commits(
+            [("/commits/main", FakeResponse(200, {"sha": HEAD})), ("/compare/", FakeResponse(404))],
+            config={"_id": "main", "core_upstream": "acme/fork"},
+        )
+        self.assertTrue(all("/repos/acme/fork/" in u for u in github.requested))
+
+    def test_a_known_commit_still_lists_what_is_pending(self):
+        commit = {"sha": "c1", "commit": {"message": "feat: algo\n\ncuerpo", "author": {"name": "n", "date": "d"}},
+                  "html_url": "u"}
+        got, _ = self._commits([
+            ("/commits/main", FakeResponse(200, {"sha": HEAD})),
+            ("/compare/", FakeResponse(200, {"status": "ahead", "ahead_by": 1, "commits": [commit],
+                                             "files": [{"filename": "SOFTWARE_FACTORY/kaanbal-api/app/x.py"}]})),
+        ])
+        self.assertEqual(got["ahead_by"], 1)
+        self.assertEqual(got["components"], ["kaanbal-api"])
+        self.assertTrue(got["touches_engine"])
+        self.assertNotIn("history_unknown", got)
+
+    def test_without_provenance_nothing_is_compared(self):
+        got, github = self._commits([("/commits/main", FakeResponse(200, {"sha": HEAD}))], base=None)
+        self.assertTrue(got["available"])
+        self.assertFalse(any("/compare/" in u for u in github.requested))
+
+
+class ProvenanceSourceTests(unittest.TestCase):
+    def test_the_provenance_remembers_which_repo_it_came_from(self):
+        db = FakeDB({"_id": "main"})
+        with mock.patch.object(cr, "get_db", return_value=db):
+            run(cr.write_provenance(version="dev-abc1234", upstream_sha="abc1234", components={},
+                                    channel="dev", upstream="kaanbal-softwarefactory/software-factory"))
+        written = db.system_config.updates[0]["$set"]["core_release"]
+        self.assertEqual(written["upstream"], "kaanbal-softwarefactory/software-factory")
+
+    def test_a_provenance_written_before_this_has_no_source(self):
+        with mock.patch.object(cr, "get_db", return_value=FakeDB(CONFIG_WITH_PROVENANCE)):
+            self.assertIsNone(run(cr.read_provenance())["upstream"])
+
+    def test_check_updates_names_the_source_it_looked_at(self):
+        db = FakeDB(CONFIG_WITH_PROVENANCE)
+        with mock.patch.dict(os.environ), \
+             mock.patch.object(cr, "get_db", return_value=db), \
+             mock.patch.object(cr, "list_releases", new=mock.AsyncMock(return_value=RELEASES)), \
+             mock.patch.object(cr, "detect_drift", new=mock.AsyncMock(return_value={"any_custom": False})):
+            os.environ.pop(cr.UPSTREAM_ENV, None)
+            got = run(cr.check_updates())
+        self.assertEqual(got["source"], "kaanbal-softwarefactory/software-factory")
 
 
 if __name__ == "__main__":

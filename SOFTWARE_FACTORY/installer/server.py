@@ -627,6 +627,38 @@ def upstream_sha():
         return out.stdout.strip() if out.returncode == 0 else ""
     except Exception:
         return ""
+
+
+def slug_from_remote(url):
+    """'https://[credenciales@]github.com/owner/repo[.git]' o 'git@github.com:owner/repo.git'
+    -> 'owner/repo'. Vacío si no es un remoto de GitHub."""
+    text = (url or "").strip()
+    if "github.com" not in text:
+        return ""
+    text = text.rsplit("github.com", 1)[1].lstrip(":/")
+    if text.endswith(".git"):
+        text = text[: -len(".git")]
+    parts = text.split("/")
+    return "/".join(parts[:2]) if len(parts) >= 2 and all(parts[:2]) else ""
+
+
+def upstream_slug():
+    """Repo (owner/repo) del que salió el checkout de este instalador, o "".
+
+    Junto con el SHA es la procedencia completa: un SHA solo no dice contra qué
+    historial compararlo, y el proyecto ya cambió de casa una vez.
+    """
+    repo_root = os.path.normpath(os.path.join(SF_ROOT, ".."))
+    try:
+        out = subprocess.run(
+            ["git", "-c", f"safe.directory={repo_root}", "-C", repo_root, "remote", "get-url", "origin"],
+            capture_output=True, text=True, timeout=15,
+        )
+        return slug_from_remote(out.stdout) if out.returncode == 0 else ""
+    except Exception:
+        return ""
+
+
 # Fuente de verdad GitOps: repos mínimos que la célula reconcilia vía ramas/overlays
 GITHUB_CORE_REPOS = (
     ("infra-gitops", True),
@@ -2128,6 +2160,7 @@ def do_install(cfg):
             cfg["core_release"] = {
                 "version": core_version or (f"install-{_sha[:7]}" if _sha else "install-local"),
                 "upstream_sha": _sha or None,
+                "upstream": upstream_slug() or None,
                 # Sin versión fijada se construye desde el monorepo: es un build
                 # de desarrollo, no una célula tuneada. `custom` queda para cuando
                 # se detecta deriva.

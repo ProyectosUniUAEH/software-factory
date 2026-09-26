@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
 # Public entry point. Download this file first; never execute a partial curl pipe.
 set -Eeuo pipefail
-REPO="https://github.com/ProyectosUniUAEH/software-factory.git"
+# KAANBAL_REPO permite instalar desde un fork o un espejo.
+REPO="${KAANBAL_REPO:-https://github.com/kaanbal-softwarefactory/software-factory.git}"
 REVISION="main"
 DESTINATION="${HOME}/kaanbal-source"
 INSTALL_MODE="--lan"

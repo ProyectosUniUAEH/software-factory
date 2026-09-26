@@ -53,6 +53,43 @@ log()  { printf '[kaanbal-upgrade] %s\n' "$*"; }
 warn() { printf '[kaanbal-upgrade] ⚠ %s\n' "$*" >&2; }
 die()  { printf '[kaanbal-upgrade] ERROR: %s\n' "$*" >&2; exit 1; }
 
+# Dónde vive el proyecto. Es la única mención al repo oficial en este script: si
+# vuelve a mudarse, se cambia aquí y en core_release.py (DEFAULT_UPSTREAM).
+DEFAULT_UPSTREAM=kaanbal-softwarefactory/software-factory
+# Donde vivía antes de la v1. Se reconoce para mudar a las células que salieron de allí.
+LEGACY_UPSTREAM=ProyectosUniUAEH/software-factory
+
+# 'https://[usuario[:token]@]github.com/owner/repo[.git]' o 'git@github.com:owner/repo.git'
+# -> owner/repo. Vacío si la URL no es de GitHub (un checkout local no es un repo oficial).
+slug_of() {
+  local url=${1:-}
+  [[ "$url" == *github.com* ]] || return 0
+  url=${url%.git}
+  printf '%s' "${url##*github.com[:/]}"
+}
+
+origin_slug() {
+  slug_of "$(git -c safe.directory="$SOURCE_DIR" -C "$SOURCE_DIR" remote get-url origin 2>/dev/null || true)"
+}
+
+# El proyecto se mudó. En un nodo, `origin` de este checkout sigue apuntando al repo
+# anterior: sin mudarlo, la siguiente actualización volvería a bajar de allí. Solo se
+# toca si es EXACTAMENTE el repo anterior, y KAANBAL_KEEP_ORIGIN=1 lo impide.
+migrate_origin() {
+  [[ "${KAANBAL_KEEP_ORIGIN:-0}" == 1 ]] && return 0
+  [[ "${UPSTREAM_SLUG,,}" == "${LEGACY_UPSTREAM,,}" ]] || return 0
+  local owner as_owner=()
+  owner=$(stat -c %U "$SOURCE_DIR")
+  if [[ $EUID -eq 0 && "$owner" != root ]]; then
+    as_owner=(runuser -u "$owner" --)
+    command -v runuser >/dev/null || as_owner=(sudo -u "$owner")
+  fi
+  log "El proyecto se mudó a $DEFAULT_UPSTREAM: origin deja de apuntar a $LEGACY_UPSTREAM"
+  "${as_owner[@]}" git -c safe.directory="$SOURCE_DIR" -C "$SOURCE_DIR" \
+    remote set-url origin "https://github.com/$DEFAULT_UPSTREAM.git" \
+    || warn "No se pudo mudar origin. Hazlo a mano: git -C $SOURCE_DIR remote set-url origin https://github.com/$DEFAULT_UPSTREAM.git"
+}
+
 command -v kubectl >/dev/null || die "kubectl no está en PATH"
 
 snapshot() {
@@ -236,20 +273,28 @@ record_provenance() {
 import asyncio, sys
 from app import db as dbmod
 from app.services import core_release
-upstream, api_tag, api_sha, console_tag, console_sha, docker_user = sys.argv[1:7]
+upstream, api_tag, api_sha, console_tag, console_sha, docker_user, upstream_slug = sys.argv[1:8]
 async def main():
     await dbmod.connect_db()
     current = await core_release.read_provenance()
     components = dict(current.get("components") or {})
     components["kaanbal-api"] = {"image": f"{docker_user}/kaanbal-api", "tag": api_tag, "repo_sha": api_sha}
     components["kaanbal-console"] = {"image": f"{docker_user}/kaanbal-console", "tag": console_tag, "repo_sha": console_sha}
-    await core_release.write_provenance(
+    kwargs = dict(
         version=f"dev-{upstream[:7]}", upstream_sha=upstream, components=components,
         channel="dev", applied_by="core-upgrade.sh",
     )
+    if upstream_slug:
+        kwargs["upstream"] = upstream_slug
+    try:
+        await core_release.write_provenance(**kwargs)
+    except TypeError:
+        # API anterior a la procedencia con repo de origen: se registra sin él.
+        kwargs.pop("upstream", None)
+        await core_release.write_provenance(**kwargs)
     print("procedencia:", f"dev-{upstream[:7]}")
 asyncio.run(main())
-' "$upstream" "$api_tag" "$api_sha" "$console_tag" "$console_sha" "$DOCKER_USER" 2>&1); then
+' "$upstream" "$api_tag" "$api_sha" "$console_tag" "$console_sha" "$DOCKER_USER" "${UPSTREAM_SLUG:-}" 2>&1); then
     warn "El upgrade quedó aplicado pero no se pudo registrar la procedencia:"
     printf '%s\n' "$out" | tail -5 | sed 's/^/    /' >&2
     return 0
@@ -301,6 +346,7 @@ fi
 
 # ── Preflight + sync ─────────────────────────────────────────────────────────
 UPSTREAM=""
+UPSTREAM_SLUG=""
 if [[ "$PHASE" == all || "$PHASE" == sync ]]; then
   [[ -d "$SOURCE_DIR/SOFTWARE_FACTORY" ]] || die "No hay checkout del monorepo en $SOURCE_DIR"
   # El checkout reescribe este mismo archivo mientras bash lo ejecuta, y bash lee
@@ -328,6 +374,10 @@ if [[ "$PHASE" == all || "$PHASE" == sync ]]; then
   fi
   UPSTREAM=$(git -c safe.directory="$SOURCE_DIR" -C "$SOURCE_DIR" rev-parse HEAD)
   log "Monorepo en ${UPSTREAM:0:7}"
+  # De qué repo salió este commit es lo que se registra como procedencia, así que se
+  # lee ANTES de mudar el remoto: el SHA de esta corrida viene del repo de origen.
+  UPSTREAM_SLUG=$(origin_slug)
+  migrate_origin
 
   POD=$(kubectl get pod -n "$NS" -l app=kaanbal-api -o jsonpath='{.items[0].metadata.name}')
   log "Preflight de imports dentro de $POD"
@@ -501,6 +551,7 @@ if [[ "$PHASE" == all || "$PHASE" == promote ]]; then
       record_provenance "$UPSTREAM"
     else
       UPSTREAM=$(git -c safe.directory="$SOURCE_DIR" -C "$SOURCE_DIR" rev-parse HEAD 2>/dev/null || true)
+      [[ -z "$UPSTREAM_SLUG" ]] && UPSTREAM_SLUG=$(origin_slug)
       [[ -n "$UPSTREAM" ]] && record_provenance "$UPSTREAM"
     fi
     snapshot | sed 's/^/  /'

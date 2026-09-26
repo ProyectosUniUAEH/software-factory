@@ -145,7 +145,7 @@
       <!-- Canal dev: commits pendientes del monorepo -->
       <div v-if="data.tracking === 'commits'" class="glass-panel p-6 rounded-xl">
         <div class="flex items-center justify-between gap-3 flex-wrap mb-4">
-          <h3 class="font-semibold text-white">Commits en software-factory</h3>
+          <h3 class="font-semibold text-white">Commits en {{ data.source || 'software-factory' }}</h3>
           <span v-if="data.upstream?.head_sha" class="font-mono text-xs text-slate-500">
             main @ {{ data.upstream.head_sha.slice(0, 7) }}
           </span>
@@ -183,8 +183,12 @@
               </span>
             </a>
           </div>
+        </template>
 
-          <div v-if="data.update_available && !upgradeRunning" class="mt-5 pt-4 border-t border-white/10">
+        <!-- El botón no depende de que haya lista de commits: cuando el historial cambió
+             (el proyecto se mudó de repositorio) no hay qué listar, pero sí qué aplicar. -->
+        <template v-if="data.update_available && !upgradeRunning">
+          <div class="mt-5 pt-4 border-t border-white/10">
             <p class="text-xs text-slate-400">
               Construye las imágenes, promueve, verifica que los pods arranquen y revierte solo si algo
               falla. Tus apps y datos no se tocan. La consola se reiniciará unos segundos durante el proceso.
@@ -205,7 +209,9 @@
 
             <div v-else class="mt-3 rounded-lg border border-amber-500/30 bg-amber-500/5 p-4">
               <p class="text-sm text-amber-200">
-                ¿Aplicar {{ data.upstream.ahead_by }} commit(s) sobre esta célula?
+                {{ data.upstream.ahead_by != null
+                  ? `¿Aplicar ${data.upstream.ahead_by} commit(s) sobre esta célula?`
+                  : `¿Actualizar esta célula a la última revisión de ${data.source || 'upstream'}?` }}
               </p>
               <div class="flex gap-2 mt-3">
                 <button @click="launchUpgrade" :disabled="launching" class="upgrade-button">

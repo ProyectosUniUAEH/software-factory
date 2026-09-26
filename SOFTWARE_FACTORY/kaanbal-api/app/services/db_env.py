@@ -92,6 +92,22 @@ def engine_from_uri(uri: Any) -> Optional[str]:
     return _SCHEMES.get(scheme.lower())
 
 
+def engine_from_template(template_id: Any) -> Optional[str]:
+    """Motor de un template del catálogo ('mongodb' → 'mongodb', 'postgres' → 'postgres').
+
+    Misma normalización que AppDeployer._detect_db_template, para que el nombre
+    del motor sea uno solo en todo el sistema.
+    """
+    candidate = str(template_id or "").strip().lower()
+    for fragment, engine in (
+        ("mongo", "mongodb"), ("postgres", "postgres"),
+        ("mysql", "mysql"), ("mariadb", "mysql"), ("redis", "redis"),
+    ):
+        if fragment in candidate:
+            return engine
+    return None
+
+
 def canonical_aliases(bindings: Iterable[Tuple[str, Mapping[str, Any]]]) -> Dict[str, str]:
     """Variables convencionales para las bases vinculadas a un ambiente.
 

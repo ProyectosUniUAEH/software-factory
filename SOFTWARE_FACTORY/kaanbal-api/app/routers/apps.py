@@ -456,15 +456,13 @@ async def get_app_homepage_promotion(app_name: str):
     }
 
 
-@router.post("", status_code=202)
-async def create_app(
-    app_data: AppCreate,
-    background_tasks: BackgroundTasks,
-    current_user: User = Depends(get_current_active_user),
-):
-    """
-    Crear una nueva app desde template.
-    Returns immediately with app_id and stream_url for SSE progress.
+async def create_app_record(app_data: AppCreate, actor: str) -> dict:
+    """Validar y registrar una app nueva; devuelve {'id', 'name', 'doc'}.
+
+    Es el único camino de alta: lo usan el Wizard (POST /apps) y el lanzador de
+    stacks, para que lanzar un stack no pueda saltarse ninguna validación del
+    Wizard (nombre libre, hosts sin choque, una raíz por dominio). No despliega:
+    de eso se encarga quien llame, con _run_deploy.
     """
     db = get_db()
 
@@ -596,7 +594,7 @@ async def create_app(
     await activity_log.log(
         "app.create.accepted",
         category=CATEGORY_APP,
-        actor=current_user.username,
+        actor=actor,
         target=app_data.name,
         detail={
             "template": app_data.template,
@@ -607,19 +605,36 @@ async def create_app(
         },
     )
 
-    # Create event queue for this deploy
+    return {"id": app_id, "name": app_data.name, "doc": app_doc}
+
+
+def start_deploy(app_id: str, app_data: AppCreate, background_tasks, actor: str) -> str:
+    """Encolar el deploy de una app recién registrada y devolver su stream SSE."""
     queue = asyncio.Queue()
     _deploy_queues[app_id] = queue
+    background_tasks.add_task(_run_deploy, app_id, app_data, queue, actor)
+    return f"/api/v1/apps/{app_id}/deploy/stream"
 
-    # Launch deploy in background
-    background_tasks.add_task(_run_deploy, app_id, app_data, queue, current_user.username)
+
+@router.post("", status_code=202)
+async def create_app(
+    app_data: AppCreate,
+    background_tasks: BackgroundTasks,
+    current_user: User = Depends(get_current_active_user),
+):
+    """
+    Crear una nueva app desde template.
+    Returns immediately with app_id and stream_url for SSE progress.
+    """
+    created = await create_app_record(app_data, current_user.username)
+    stream_url = start_deploy(created["id"], app_data, background_tasks, current_user.username)
 
     return {
-        "id": app_id,
-        "name": app_data.name,
+        "id": created["id"],
+        "name": created["name"],
         "status": "deploying",
         "message": "Deployment started",
-        "stream_url": f"/api/v1/apps/{app_id}/deploy/stream"
+        "stream_url": stream_url,
     }
 
 

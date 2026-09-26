@@ -20,7 +20,7 @@ import os
 import logging
 
 from app.config import settings
-from app.routers import apps, clients, config, webhooks, health, templates, setup, auth, system, admin, logs, domains, links, sites, security, core
+from app.routers import apps, clients, config, webhooks, health, templates, setup, auth, system, admin, logs, domains, links, sites, security, stacks, core
 from app.db import connect_db, close_db
 from app.middleware.acl import AccessControlMiddleware
 from app.services.activity_log import activity_log, CATEGORY_API, CATEGORY_ERROR
@@ -153,6 +153,7 @@ app.include_router(domains.router, prefix="/api/v1/domains", tags=["Domains"])
 app.include_router(core.router, prefix="/api/v1/core", tags=["Core Updates"])
 app.include_router(links.router, prefix="/api/v1/links", tags=["Service Links"])
 app.include_router(security.router, prefix="/api/v1/security", tags=["Security"])
+app.include_router(stacks.router, prefix="/api/v1/stacks", tags=["Stacks"])
 app.include_router(sites.router, prefix="/api/v1/sites", tags=["Sites"])
 app.include_router(config.router, prefix="/api/v1/config", tags=["Config"])
 app.include_router(logs.router, prefix="/api/v1/logs", tags=["Activity Logs"])

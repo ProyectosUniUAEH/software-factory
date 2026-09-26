@@ -45,4 +45,4 @@ secretGenerator:
       - HOMEPAGE_DB_DATABASE=homepage_api
       - HOMEPAGE_DB_USER=proadmin
       - HOMEPAGE_DB_PASSWORD=CHANGE_ME
-      - HOMEPAGE_DB_URI=mongodb://proadmin:Hvh0DtFdd5WkEN51oCP9sNuz@homepage-db.prod.svc.cluster.local:27017/homepage_api?authSource=admin
+      - HOMEPAGE_DB_URI=mongodb://proadmin:CHANGE_ME@homepage-db.prod.svc.cluster.local:27017/homepage_api?authSource=admin

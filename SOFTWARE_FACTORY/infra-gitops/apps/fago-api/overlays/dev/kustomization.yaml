@@ -45,4 +45,4 @@ secretGenerator:
       - FAGO_BD_POSTGRES_DATABASE=fago_bd_postgres
       - FAGO_BD_POSTGRES_USER=devadmin
       - FAGO_BD_POSTGRES_PASSWORD=CHANGE_ME
-      - FAGO_BD_POSTGRES_URI=postgresql://devadmin:NSdxDGAhkX4sl8hiXzLWaTxz@fago-bd-postgres.dev.svc.cluster.local:5432/fago_bd_postgres
+      - FAGO_BD_POSTGRES_URI=postgresql://devadmin:CHANGE_ME@fago-bd-postgres.dev.svc.cluster.local:5432/fago_bd_postgres

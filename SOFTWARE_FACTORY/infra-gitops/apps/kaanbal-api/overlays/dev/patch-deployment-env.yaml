@@ -23,4 +23,4 @@ spec:
         - name: INFRA_REPO
           value: "infra-gitops"
         - name: SECRET_KEY
-          value: "Ws6I4BI7n06yYAJCoYhfZpvTJf5lOTuyMbz8GVE9hdVatE9rR8JB8XybrWtHfds8"
+          value: "CHANGE_ME"

@@ -34,8 +34,13 @@ server = MCPServer(
     instructions=(
         "Kaanbal es la plataforma donde viven estas aplicaciones. Para diagnosticar algo que "
         "falla: app_health primero, luego app_logs, y app_env_var_names si el error menciona una "
-        "variable de entorno. Nunca vas a poder leer el valor de un secreto, y solo dos "
-        "herramientas cambian algo (sync_app y repair_db_bindings)."
+        "variable de entorno. Consulta platform_capabilities para conocer la autonomía concedida. "
+        "Los comandos en apps y nodos requieren token crítico y política explícita. "
+        "Para mejorar código: abrir workspace, esperar Running, inicializar, editar, validar, "
+        "leer diff y publicar PR con su digest. El core requiere revisión del owner. "
+        "Después del merge puedes aplicar platform_upgrade y consultar su estado al reconectar. "
+        "Vuelve a descubrir capacidades después de actualizar; invoke_platform_tool usa las nuevas herramientas. "
+        "No imprimas credenciales ni inventes tablas de usuarios: inspecciona el código y usa el mecanismo de la app."
     ),
 )
 
@@ -102,7 +107,27 @@ async def repair_db_bindings(name: str) -> str:
     return await _run("repair_db_bindings", name=name)
 
 
+async def platform_capabilities() -> str:
+    return await _run("platform_capabilities")
+
+
+async def invoke_platform_tool(tool: str, arguments: Dict[str, Any]) -> str:
+    return await _run("invoke_platform_tool", tool=tool, arguments=arguments)
+
+
+async def platform_upgrade(ref: str = "main") -> str:
+    return await _run("platform_upgrade", ref=ref)
+
+
+async def platform_upgrade_status(name: Optional[str] = None) -> str:
+    return await _run("platform_upgrade_status", name=name)
+
+
 HANDLERS: Dict[str, Any] = {
+    "platform_capabilities": platform_capabilities,
+    "invoke_platform_tool": invoke_platform_tool,
+    "platform_upgrade": platform_upgrade,
+    "platform_upgrade_status": platform_upgrade_status,
     "list_apps": list_apps,
     "get_app": get_app,
     "app_health": app_health,

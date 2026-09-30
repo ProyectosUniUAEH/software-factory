@@ -15,7 +15,7 @@ from typing import Any, Dict, Optional
 
 import httpx
 
-DEFAULT_TIMEOUT = 30.0
+DEFAULT_TIMEOUT = 180.0
 
 
 class KaanbalError(RuntimeError):
@@ -24,8 +24,8 @@ class KaanbalError(RuntimeError):
 
 class KaanbalClient:
     def __init__(self, base_url: Optional[str] = None, token: Optional[str] = None, *, timeout: float = DEFAULT_TIMEOUT):
-        self.base_url = (base_url or os.getenv("KAANBAL_URL", "")).rstrip("/")
-        self.token = token or os.getenv("KAANBAL_TOKEN", "")
+        self.base_url = (os.getenv("KAANBAL_URL", "") if base_url is None else base_url).rstrip("/")
+        self.token = os.getenv("KAANBAL_TOKEN", "") if token is None else token
         self.timeout = timeout
         if not self.base_url:
             raise KaanbalError("Falta KAANBAL_URL (por ejemplo https://kaanbal-api.softwarefactory.site).")

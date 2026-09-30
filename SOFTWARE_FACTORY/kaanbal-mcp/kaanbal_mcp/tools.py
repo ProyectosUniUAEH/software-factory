@@ -2,14 +2,10 @@
 Herramientas que el agente puede usar sobre Kaanbal
 ===================================================
 
-Casi todo es lectura: ver apps, su salud, sus logs, sus dominios y la bitácora.
-Las dos únicas acciones son las que se pueden repetir sin riesgo —sincronizar con
-ArgoCD y republicar los nombres de la base—, y solo funcionan si el token las
-incluye.
-
-Lo que NO existe a propósito: leer valores de secretos, crear o borrar apps,
-tocar credenciales y actualizar el core. Eso se hace desde la consola, con una
-persona mirando.
+Incluye diagnóstico, sincronización y reparación de bindings. El puente de
+descubrimiento añade workspaces, PRs, comandos y actualización de la plataforma.
+La API aplica ACL, política de recursos y requisitos de token crítico.
+Los comandos de reparación pueden acceder a datos sensibles en su alcance.
 
 El esquema de argumentos sale de la firma de cada función en server.py; aquí se
 declara para qué sirve cada una y qué permiso necesita el token (la API es quien
@@ -19,10 +15,16 @@ manda, esto es para poder explicarlo cuando falta).
 from __future__ import annotations
 
 from typing import Any, Dict, List
+import re
+from urllib.parse import quote
 
-from .client import KaanbalClient
+from .client import KaanbalClient, KaanbalError
 
 TOOLS: List[Dict[str, Any]] = [
+    {"name": "platform_capabilities", "description": "Descubre las herramientas vigentes de la plataforma, argumentos y permisos. Repetir después de actualizar Kaanbal.", "permission": "autonomy.tools.view"},
+    {"name": "invoke_platform_tool", "description": "Ejecuta una herramienta anunciada por platform_capabilities con arguments como objeto JSON. Permite usar herramientas nuevas sin reinstalar este MCP; la API siempre aplica ACL y política.", "permission": "autonomy.tools.view"},
+    {"name": "platform_upgrade", "description": "Aplica una actualización de Kaanbal desde upstream tras el merge. Devuelve el Job para consultar el progreso.", "permission": "core.updates.apply"},
+    {"name": "platform_upgrade_status", "description": "Consulta el Job de actualización y su log después de reconectar con la API.", "permission": "core.updates.view"},
     {
         "name": "list_apps",
         "description": "Lista las aplicaciones con su dominio, URL pública y estado. Punto de partida para casi todo.",
@@ -120,6 +122,42 @@ def _app_summary(app: Dict[str, Any]) -> Dict[str, Any]:
 async def call_tool(client: KaanbalClient, name: str, arguments: Dict[str, Any]) -> Any:
     """Ejecutar una herramienta. Devuelve datos ya resumidos, no el volcado crudo."""
     args = arguments or {}
+
+    if name == "platform_capabilities":
+        return await client.get("/autonomy/capabilities")
+
+    if name == "invoke_platform_tool":
+        catalog = await client.get("/autonomy/capabilities")
+        if catalog.get("protocol_version") != 1:
+            raise KaanbalError("La API requiere otra versión del puente MCP; actualiza el cliente.")
+        spec = next((t for t in catalog.get("tools", []) if t["name"] == args.get("tool")), None)
+        if not spec:
+            raise KaanbalError("La herramienta no existe o no está concedida al token. Consulta platform_capabilities.")
+        values = args.get("arguments") or {}
+        if not isinstance(values, dict):
+            raise KaanbalError("arguments debe ser un objeto JSON.")
+        allowed = set(spec["path_args"] + spec["query_args"] + spec["body_args"])
+        if set(values) - allowed or set(spec["required"]) - set(values):
+            raise KaanbalError(f"Argumentos inválidos. Admitidos: {sorted(allowed)}; requeridos: {spec['required']}.")
+        path = spec["path"]
+        if not re.fullmatch(r"/(?:autonomy|core|apps)/[A-Za-z0-9_/{}/-]+", path) or ".." in path or "//" in path:
+            raise KaanbalError("El catálogo anunció una ruta no admitida.")
+        for key in spec["path_args"]:
+            value = str(values[key])
+            if not value or value in (".", "..") or "/" in value or "\\" in value:
+                raise KaanbalError("Identificador de recurso inválido.")
+            path = path.replace("{" + key + "}", quote(value, safe=""))
+        if "{" in path or "}" in path or spec["method"] not in {"GET", "POST", "PUT", "PATCH", "DELETE"}:
+            raise KaanbalError("Contrato de herramienta inválido.")
+        query = {k: values[k] for k in spec["query_args"] if k in values}
+        body = {k: values[k] for k in spec["body_args"] if k in values}
+        return await client.request(spec["method"], path, params=query, **({"json": body} if spec["method"] != "GET" else {}))
+
+    if name == "platform_upgrade":
+        return await client.post("/core/upgrade", {"ref": args.get("ref", "main")})
+
+    if name == "platform_upgrade_status":
+        return await client.get("/core/upgrade", {"name": args.get("name")})
 
     if name == "list_apps":
         apps = await client.get("/apps")

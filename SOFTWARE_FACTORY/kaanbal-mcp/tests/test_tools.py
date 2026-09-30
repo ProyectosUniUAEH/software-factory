@@ -1,7 +1,6 @@
-"""Herramientas del MCP: qué pide, qué devuelve y qué nunca devuelve.
+"""Contratos del MCP: diagnóstico redactado, ACL y descubrimiento dinámico.
 
-Lo que más importa aquí es lo último: un agente conectado a la plataforma no
-puede terminar con un secreto en su contexto.
+Las pruebas no ejecutan comandos de reparación ni acceden a servicios reales.
 """
 
 import asyncio
@@ -16,7 +15,7 @@ from kaanbal_mcp.client import KaanbalClient, KaanbalError  # noqa: E402
 
 
 def run(coro):
-    return asyncio.new_event_loop().run_until_complete(coro)
+    return asyncio.run(coro)
 
 
 class FakeClient:
@@ -32,6 +31,10 @@ class FakeClient:
 
     async def post(self, path, json=None):
         self.calls.append(("POST", path, json or {}))
+        return self.responses.get(path, {"ok": True})
+
+    async def request(self, method, path, **kwargs):
+        self.calls.append((method, path, kwargs))
         return self.responses.get(path, {"ok": True})
 
 
@@ -59,12 +62,14 @@ class CatalogTests(unittest.TestCase):
     def test_every_tool_in_the_catalog_is_actually_handled(self):
         """Un nombre en el catálogo sin implementación sería una promesa vacía."""
         for tool in tools.TOOLS:
+            if tool["name"] == "invoke_platform_tool":
+                continue  # exercised against a versioned catalog below
             try:
                 run(tools.call_tool(FakeClient(), tool["name"], {"name": "x"}))
             except ValueError:
                 self.fail(f"{tool['name']} está en el catálogo pero call_tool no lo atiende")
 
-    def test_only_two_tools_change_anything(self):
+    def test_existing_idempotent_actions_keep_the_deploy_permission(self):
         acciones = [t["name"] for t in tools.TOOLS if t["permission"] == "apps.apps.deploy"]
         self.assertEqual(sorted(acciones), ["repair_db_bindings", "sync_app"])
 
@@ -74,11 +79,8 @@ class CatalogTests(unittest.TestCase):
             self.assertNotEqual(tool["permission"], "system.secrets.view", tool["name"])
             self.assertNotEqual(tool["permission"], "system.credentials.view", tool["name"])
 
-    def test_no_tool_creates_or_deletes(self):
-        prohibidos = ("create", "delete", "launch", "upgrade", "manage")
-        for tool in tools.TOOLS:
-            action = tool["permission"].rsplit(".", 1)[-1]
-            self.assertNotIn(action, prohibidos, tool["name"])
+    def test_upgrade_has_its_own_acl(self):
+        self.assertEqual(tools.TOOLS_BY_NAME["platform_upgrade"]["permission"], "core.updates.apply")
 
 
 class ListingTests(unittest.TestCase):
@@ -131,6 +133,29 @@ class DiagnosisTests(unittest.TestCase):
 
 
 class ActionTests(unittest.TestCase):
+    def test_dynamic_tool_preserves_json_null_for_deletion(self):
+        spec = {"name": "write", "method": "POST", "path": "/autonomy/workspaces/{workspace_id}/files",
+            "path_args": ["workspace_id"], "query_args": [], "body_args": ["path", "content"],
+            "required": ["workspace_id", "path", "content"]}
+        client = FakeClient({"/autonomy/capabilities": {"protocol_version": 1, "tools": [spec]}})
+        run(tools.call_tool(client, "invoke_platform_tool", {"tool": "write", "arguments": {"workspace_id": "abc", "path": "README.md", "content": None}}))
+        self.assertIsNone(client.calls[-1][2]["json"]["content"])
+
+    def test_dynamic_tool_cannot_redirect_credentials(self):
+        spec = {"name": "bad", "method": "POST", "path": "https://elsewhere.invalid",
+            "path_args": [], "query_args": [], "body_args": [], "required": []}
+        client = FakeClient({"/autonomy/capabilities": {"protocol_version": 1, "tools": [spec]}})
+        with self.assertRaises(KaanbalError):
+            run(tools.call_tool(client, "invoke_platform_tool", {"tool": "bad", "arguments": {}}))
+        self.assertEqual(len(client.calls), 1)
+
+    def test_capability_refresh_sees_new_server_tools(self):
+        client = FakeClient({"/autonomy/capabilities": {"protocol_version": 1, "tools": []}})
+        with self.assertRaises(KaanbalError):
+            run(tools.call_tool(client, "invoke_platform_tool", {"tool": "new", "arguments": {}}))
+        client.responses["/autonomy/capabilities"]["tools"] = [{"name": "new", "method": "GET", "path": "/core/updates", "path_args": [], "query_args": [], "body_args": [], "required": []}]
+        self.assertEqual(run(tools.call_tool(client, "invoke_platform_tool", {"tool": "new", "arguments": {}})), {"ok": True})
+
     def test_sync_calls_argocd(self):
         client = FakeClient()
         run(tools.call_tool(client, "sync_app", {"name": "mi-app"}))
